@@ -1,0 +1,14 @@
+{
+  "kind": "Host-only execution of the reviewed Global account fixture producer linked to the locked beam-program crate",
+  "exitCode": 0,
+  "head": "c707f3022f947572b20f730ccae11a8ccb8da52a",
+  "sourcePath": "sdk/tools/generate-global-fixtures.rs",
+  "sourceSha256": "529bba30f3bd4206778012021b08e6b7eecb4761f254b0c318ff953e8b2684a6",
+  "stdoutPath": "sdk/fixtures/global.json",
+  "stdoutSha256": "8348b72f3552adb31588749b9f763c002e106482d5b2acdfdfa3101578b8ef32",
+  "stdoutBytes": 17871,
+  "noHandlersOrNetworkOrTransactions": true,
+  "cargo": "1.97.0",
+  "rustc": "1.97.0",
+  "command": "cp sdk/tools/generate-global-fixtures.rs programs/beam/examples/beam_global_fixture.rs && cargo run --locked --manifest-path programs/beam/Cargo.toml --example beam_global_fixture; rm -r programs/beam/examples"
+}

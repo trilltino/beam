@@ -1,0 +1,14 @@
+{
+  "kind": "Host-only execution of the reviewed V2 account-meta fixture producer linked to the locked beam-program crate",
+  "exitCode": 0,
+  "head": "c707f3022f947572b20f730ccae11a8ccb8da52a",
+  "sourcePath": "sdk/tools/generate-v2-account-fixtures.rs",
+  "sourceSha256": "f3be389bec5e2ba87f639675b0d44862a8b286eb2fe4ecd44a18a7c848a58e80",
+  "stdoutPath": "sdk/fixtures/v2-accounts.json",
+  "stdoutSha256": "791de39b55e496629545f7453d78df4f363fd3ad503fa7a58166aacdb1a606c4",
+  "stdoutBytes": 10873,
+  "noHandlersOrNetworkOrTransactions": true,
+  "cargo": "1.97.0",
+  "rustc": "1.97.0",
+  "command": "cp sdk/tools/generate-v2-account-fixtures.rs programs/beam/examples/beam_v2_account_fixture.rs && cargo run --locked --manifest-path programs/beam/Cargo.toml --example beam_v2_account_fixture; rm -r programs/beam/examples"
+}
