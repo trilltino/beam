@@ -1,7 +1,8 @@
-// Client-side consistency guard for a separately authenticated creator/vault pair.
-// It does not derive PDAs, authenticate chain data, or authorize a fee claim.
+// Client-side PDA/consistency guard for a separately authenticated creator.
+// It does not authenticate chain data or authorize a fee claim.
 import { decodeBase58Pubkey } from './beam-native.mjs';
 import { buildCollectCreatorFee } from './beam-creator.mjs';
+import { deriveCreatorVault, deriveEventAuthority } from './beam-pdas.mjs';
 
 function expectedPair(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)
@@ -26,10 +27,16 @@ function expectedPair(value) {
 export function buildCollectCreatorFeeForExpectedRecipient(config, accounts, expected) {
   if (arguments.length !== 3) throw new TypeError('expected config, accounts and recipient pair');
   const pair = expectedPair(expected);
+  if (pair.creatorVault !== deriveCreatorVault(pair.creator).address) {
+    throw new RangeError('expected creator vault is not the canonical PDA');
+  }
   const instruction = buildCollectCreatorFee(config, accounts);
   if (instruction.keys[0].pubkey !== pair.creator
       || instruction.keys[1].pubkey !== pair.creatorVault) {
     throw new RangeError('creator or vault differs from expected recipient pair');
+  }
+  if (instruction.keys[3].pubkey !== deriveEventAuthority().address) {
+    throw new RangeError('event authority is not the canonical PDA');
   }
   return instruction;
 }
