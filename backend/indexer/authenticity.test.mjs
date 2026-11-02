@@ -103,3 +103,26 @@ test('source status changes during asynchronous proof hooks invalidate the resul
   } });
   await assert.rejects(simulateSourceProofBoundary(indexer, evidence, proof, hooks), code('STALE_SOURCE'));
 });
+
+test('proof and hook mutation during awaits cannot replace already bound inputs', async () => {
+  const { indexer, evidence, proof } = setup();
+  const expectedHash = proof.transaction.dataHash;
+  let sawOriginalTransactionHook = false;
+  const hooks = localHooks({ verifyTransaction: async (transaction) => {
+    sawOriginalTransactionHook = true;
+    assert.equal(transaction.dataHash, expectedHash);
+    assert.equal(Object.isFrozen(transaction), true);
+    return true;
+  } });
+  hooks.verifyRoot = async (root, source) => {
+    assert.equal(Object.isFrozen(root), true);
+    assert.equal(Object.isFrozen(source.tip), true);
+    assert.throws(() => { root.hash = pk(99); }, TypeError);
+    proof.transaction.dataHash = '0'.repeat(64);
+    hooks.verifyTransaction = async () => false;
+    return true;
+  };
+  const result = await simulateSourceProofBoundary(indexer, evidence, proof, hooks);
+  assert.equal(sawOriginalTransactionHook, true);
+  assert.equal(result.verifiedChain, false);
+});

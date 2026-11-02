@@ -46,6 +46,9 @@ export async function simulateSourceProofBoundary(indexer, evidence, proof, veri
   for (const name of ['verifyRoot', 'verifyTransaction', 'verifyAccount', 'verifyAssociation']) {
     if (typeof verifier[name] !== 'function') fail('INVALID_PROOF', `missing ${name} hook`);
   }
+  const checks = Object.freeze(Object.fromEntries(
+    ['verifyRoot', 'verifyTransaction', 'verifyAccount', 'verifyAssociation']
+      .map((name) => [name, verifier[name].bind(verifier)])));
   const description = indexer.describe();
   if (description.stateDigest !== wrapped.stateDigest || description.revision !== wrapped.revision
     || !description.tip || !description.finalized || description.tip.hash !== description.finalized.hash) fail('STALE_SOURCE', 'source is not a stable finalized fixture tip');
@@ -56,7 +59,13 @@ export async function simulateSourceProofBoundary(indexer, evidence, proof, veri
   const event = eventPage.items[0];
   const curve = curvePage.item;
   if (!event || !curve || eventPage.stateDigest !== wrapped.stateDigest || curvePage.stateDigest !== wrapped.stateDigest) fail('STALE_SOURCE', 'records changed during proof preparation');
-  const root = proof.root; const tx = proof.transaction; const account = proof.account; const association = proof.association;
+  // Detach and freeze before any asynchronous hook can see caller-owned values.
+  const root = Object.freeze({ ...proof.root });
+  const tx = Object.freeze({ ...proof.transaction });
+  const account = Object.freeze({ ...proof.account });
+  const association = Object.freeze({ ...proof.association });
+  const source = Object.freeze({ stateDigest: description.stateDigest, revision: description.revision,
+    tip: Object.freeze({ ...description.tip }), finalized: Object.freeze({ ...description.finalized }) });
   key(root.genesisHash, 'root.genesisHash'); key(root.hash, 'root.hash'); slot(root.slot, 'root.slot');
   key(tx.blockHash, 'transaction.blockHash'); key(tx.programId, 'transaction.programId'); slot(tx.slot, 'transaction.slot'); digest(tx.dataHash, 'transaction.dataHash');
   key(account.address, 'account.address'); key(account.ownerProgram, 'account.ownerProgram'); key(account.blockHash, 'account.blockHash'); slot(account.slot, 'account.slot'); digest(account.dataHash, 'account.dataHash');
@@ -70,10 +79,10 @@ export async function simulateSourceProofBoundary(indexer, evidence, proof, veri
     || association.mint !== token.mint || association.curveAccount !== token.curveAccount || association.quoteMint !== token.quoteMint
     || BigInt(tx.slot) > BigInt(root.slot) || BigInt(account.slot) > BigInt(root.slot)) fail('PROOF_MISMATCH', 'claimed proof is not bound to the retained fixture');
   try {
-    if (await verifier.verifyRoot(root, description) !== true
-      || await verifier.verifyTransaction(tx, root) !== true
-      || await verifier.verifyAccount(account, root) !== true
-      || await verifier.verifyAssociation(association, tx, account) !== true) fail('PROOF_REJECTED', 'a required local proof hook rejected');
+    if (await checks.verifyRoot(root, source) !== true
+      || await checks.verifyTransaction(tx, root) !== true
+      || await checks.verifyAccount(account, root) !== true
+      || await checks.verifyAssociation(association, tx, account) !== true) fail('PROOF_REJECTED', 'a required local proof hook rejected');
   } catch { fail('PROOF_REJECTED', 'a required local proof hook failed'); }
   const after = indexer.describe();
   if (after.stateDigest !== wrapped.stateDigest || after.revision !== wrapped.revision) fail('STALE_SOURCE', 'fixture changed while proof hooks ran');
