@@ -1,0 +1,20 @@
+[package]
+name = "beam-amm-v4-source-gate"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+mint-authority-guard = []
+
+[dependencies]
+anchor-lang = "=0.31.1"
+beam-program = { path = "../../programs/beam", features = ["amm-v4-probe"] }
+solana-program-test = "=2.2.1"
+solana-sdk = "=2.2.1"
+tokio = { version = "=1.43.0", features = ["macros", "rt-multi-thread"] }
+raydium_amm = { path = "raydium-compat", default-features = false, features = ["no-entrypoint", "devnet"] }
+spl-token = { version = "=7.0.0", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "=6.0.0", features = ["no-entrypoint"] }
+
+[workspace]
