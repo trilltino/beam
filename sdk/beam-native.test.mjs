@@ -69,6 +69,32 @@ test('CreateV2 enforces UTF-8 metadata limits and Beam creation policy', () => {
   assert.throws(() => buildCreateV2({ ...createV2Fixture.createV2.accounts, program: zero }, args), /self-CPI/);
 });
 
+test('CreateV2 encodes the creator request without implying an editable payout wallet', () => {
+  const { args, accounts } = createV2Fixture.createV2;
+  const zero = '11111111111111111111111111111111';
+  const direct = encodeCreateV2(args);
+  const otherCreator = encodeBase58Pubkey(new Uint8Array(32).fill(8));
+  assert.notEqual(otherCreator, args.creator);
+  const otherDirect = encodeCreateV2({ ...args, creator: otherCreator });
+  const holder = encodeCreateV2({ ...args, creator: zero, isHolderReward: true });
+  // The last 43 bytes are creator, Mayhem, cashback, creator fee, holder flag.
+  assert.deepEqual(direct.subarray(-43, -11), decodeBase58Pubkey(args.creator));
+  assert.deepEqual(otherDirect.subarray(-43, -11), decodeBase58Pubkey(otherCreator));
+  assert.deepEqual(otherDirect.subarray(0, -43), direct.subarray(0, -43));
+  assert.deepEqual(holder.subarray(-43, -11), decodeBase58Pubkey(zero));
+  assert.equal(direct.at(-1), 0);
+  assert.equal(holder.at(-1), 1);
+  // In holder mode the program, not this encoder, replaces the request with
+  // the holder-rewards PDA after checking the Global feature setting.
+  for (const unsupported of [
+    { payoutWallet: args.creator },
+    { feeRecipient: args.creator },
+  ]) {
+    assert.throws(() => encodeCreateV2({ ...args, ...unsupported }), /unsupported CreateV2 argument/);
+    assert.throws(() => buildCreateV2(accounts, { ...args, ...unsupported }), /unsupported CreateV2 argument/);
+  }
+});
+
 test('base58 pubkeys roundtrip and malformed keys fail', () => {
   const zero = '11111111111111111111111111111111';
   assert.equal(encodeBase58Pubkey(decodeBase58Pubkey(zero)), zero);

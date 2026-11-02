@@ -30,6 +30,11 @@ rewards remain an allowed flag, but the program replaces the supplied creator
 with a holder-rewards PDA when that flag is enabled and requires global holder
 rewards to be enabled. For native SOL creation, the handler uses its fee
 schedule and does not apply a caller-supplied configurable creator fee rate.
+The `creator` argument selects the creator identity in normal mode, not a
+separate editable payout wallet. Unknown CreateV2 arguments such as
+`payoutWallet` are rejected so clients cannot silently present an unsupported
+fee-recipient choice. In holder-reward mode, the encoded creator is only a
+request field; the on-chain handler resolves the holder-rewards PDA.
 
 These helpers **do not** derive or verify PDAs, associated token accounts,
 fee recipients, token program ownership, remaining accounts, signatures,

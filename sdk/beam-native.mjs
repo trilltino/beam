@@ -93,8 +93,12 @@ export function encodeCreate({ name, symbol, uri, creator }) {
 
 export function encodeCreateV2({
   name, symbol, uri, creator, isMayhemMode, isCashbackEnabled,
-  creatorFeeBps, isHolderReward,
+  creatorFeeBps, isHolderReward, ...unsupported
 }) {
+  const extra = Object.keys(unsupported);
+  if (extra.length) {
+    throw new TypeError(`unsupported CreateV2 argument: ${extra.join(', ')}`);
+  }
   const mayhem = bool(isMayhemMode, 'isMayhemMode');
   const cashback = bool(isCashbackEnabled, 'isCashbackEnabled');
   const holder = bool(isHolderReward, 'isHolderReward');
