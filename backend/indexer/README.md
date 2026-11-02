@@ -90,6 +90,22 @@ combined tree. It skips on older stacked bases without `web/src/indexerAdapter.t
 on main it asserts wrapper rejection, unverified-only parsing if a caller
 extracts the page, sample labeling and disabled transaction capabilities.
 
+`simulateSourceProofBoundary(indexer, evidence, proof, verifier)` is a
+**local-only authenticity interface exercise**, not a chain verifier. The
+versioned proof claims a finalized root (including network genesis), event
+signature/program/raw-data hash and block inclusion, curve account
+owner/raw-data hash and block inclusion, and mint/curve/quote association.
+It binds these claims to the retained fixture snapshot, then requires four
+separate injected checks: `verifyRoot`, `verifyTransaction`, `verifyAccount`
+and `verifyAssociation`. A changed fixture revision during asynchronous checks
+fails. Even when mock checks all return true, the only result is frozen
+`local-proof-simulation` with `live: false` and `verifiedChain: false`.
+The caller-supplied root, fixture commitment and mock callbacks are not a
+source of trust. Production needs an independently selected and authenticated
+Solana source, pinned network identity, rooted block/finality verification,
+transaction/log inclusion and account-state proof or trusted-provider policy;
+none is configured here. Never turn this simulation result into a live label.
+
 ## Replay, finality and authorization boundary
 
 `createFixtureIndexer({ sourceId, limits? })` creates an in-memory instance.
