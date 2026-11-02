@@ -37,6 +37,15 @@ does not promise profitable launches, price support, loss prevention, or any
 particular token size. See the [feature ledger](docs/FEATURES.md) for what is
 actually implemented.
 
+Launch concentration and bundled early buying are a planned risk gate, not a
+working restriction or bot detector. A displayed market cap does not measure
+the reserve depth available for a sale. Before showing a risk label or changing
+launch behavior, test reserve depth, concentrated holdings, bundled buys and
+exit price impact with deterministic cases and stated data limits. No wallet
+cap, threshold, anti-sniper protection or price outcome has been approved.
+See the [launch-risk threat model](docs/LAUNCH_RISK.md) and
+[local model tests](tests/launch-risk/README.md).
+
 The flagship **$BEAM** token is intended to launch on Beam. The goal is to
 devote a very high, **not yet quantified** share of eligible protocol revenue
 to $BEAM buybacks and burns. No percentage, revenue denominator, spending

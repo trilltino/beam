@@ -224,6 +224,13 @@ precise specification and isolated adversarial tests.
    explicitly unavailable. The immutable upstream archive remains only a
    provenance reference. No PumpSwap runtime fallback or claim that blocked
    entrypoints are finished feature parity.
+8. **Launch concentration and bundle-risk gate.** Model reserve depth and
+   realizable price impact separately from displayed market cap. Define
+   deterministic cases for concentrated holdings, bundled early buys,
+   coordinated exits and stale or missing inputs. Keep the
+   [threat model](LAUNCH_RISK.md) and [local model tests](../tests/launch-risk/README.md)
+   explicit about assumptions. This is planned research, not a bot detector,
+   chosen threshold, wallet cap, launch restriction or return promise.
 
 ## Website and backend contribution lanes
 
@@ -238,6 +245,7 @@ behavior and interface tests, not recovered proprietary web/backend bytes.
 | --- | --- | --- |
 | Website and UI | Merged PR #17 provides a read-only web adapter; PR #6's `web/` remains a sample preview. Additional UI requires typed state from a verified chain data source. Retro styling must explain Beam's selected AMM v4 path rather than present PumpSwap as its engine. | Responsive create/discovery/detail flows; keyboard/modal/storage tests; visible freshness and unavailable states; no preview RPC/signature attempt. Add factual "How it works" onboarding sourced from verified Beam graduation, LP custody/burn, fees, launch allocations and availability; do not import screenshot thresholds or unsupported selling/allocation promises. |
 | King of the Hill discovery | Unclaimed planned lane under `web/` and the read-only indexer/API. First document evidenced historical mechanics; do not guess old thresholds or add a migration wait. Coordinate with the website/indexer owners before edits. | Specify eligible token and curve stage, authenticated ranking metric and tie-breaks, dethroning/refresh, graduation, freshness/reorg and manipulation-resistant inputs. Test deterministic ranking and turnover plus an accessible mobile retro featured area. Label fixtures; no invented live leader, paid placement, investment advice, audited-safety or return claim. |
+| Launch concentration and bundle risk | Planned model and disclosure lane, separate from the disabled buy-side launch-fee prototype. [Threat model](LAUNCH_RISK.md) and [model tests](../tests/launch-risk/README.md) must identify their data source and assumptions before a UI risk label or contract rule. | Deterministic tests compare an illustrative spot-cap proxy with reserve depth and modeled exit impact; future displayed market-cap data needs its own verified definition. Cover concentrated holdings, bundle-shaped early buys, coordinated exits, and stale or untrusted inputs. No verified bot detection, production threshold, wallet cap, fee change or promised price outcome. |
 | Per-token discussion and ongoing-community discovery | Planned, unclaimed `web/` plus moderated backend lane; coordinate with callout/indexer owners. Do not equate flagship plans with rewards for every token. | Define opt-in identity, moderation, rate limits, anti-spam and accessible comments. Test abuse and stale/removed content; avoid synthetic trading/engagement bumps or raid spam. Any reward/airdrop display requires independently approved eligibility, funding and timing. |
 | Wallet SDK and IDL | PR #13 creator remains draft; PR #18 CreateV2 and PR #20 raw events are merged local baselines. Regenerated Beam IDL, configured ID and complete builders remain open. | Golden fixtures against Anchor; exact integer amounts; reject missing/stale accounts; construction separate from signing/sending. |
 | Read-only indexer and API | PR #16 owns local fixture backend; merged PR #17 supplies an unverified web adapter. Agree on versioned schema, slot/finality and cursor. No trading authority. | Replay/rollback, duplicate-event and malformed-account tests; bounded queries; fixtures labeled; no fabricated market metrics. |

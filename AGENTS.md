@@ -89,6 +89,14 @@ a GitHub PR.
   design is a goal, not a return guarantee. Do not impose ticker exclusivity,
   launch restrictions, fees or rewards from this direction alone, or promise
   token performance or loss prevention.
+- Treat launch concentration and bundled buying as a first-class, planned
+  risk gate. Displayed market cap is not reserve depth or realizable exit
+  value. Use deterministic model tests for shallow reserves, concentrated
+  holdings, bundled early buys and coordinated exits, with source/freshness
+  limits visible. Do not infer bot identity, promise sniper prevention or
+  price support, or impose thresholds, wallet caps, fees or restrictions
+  without a reviewed decision. See [launch-risk research](docs/LAUNCH_RISK.md)
+  and [model test scope](tests/launch-risk/README.md).
 - Follow the [Beam visual identity brief](docs/BRAND.md) for the crossbar-free
   curved A mark and restrained 1980s retro-futurist frontend: black primary,
   electric blue secondary and purple tertiary. Preserve accessible data and
