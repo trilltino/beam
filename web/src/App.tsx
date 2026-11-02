@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import {
   Activity,
   ArrowRight,
@@ -40,6 +47,12 @@ import {
 
 type Feed = "trending" | "new" | "graduating" | "watchlist";
 type Modal = "create" | "wallet" | "how" | null;
+const FEED_ORDER: readonly Feed[] = [
+  "trending",
+  "new",
+  "graduating",
+  "watchlist",
+];
 
 function draftToken(draft: DraftRecord): Token {
   const minutes = Math.max(
@@ -230,6 +243,44 @@ function TokenCard({
 
 function App() {
   const [feed, setFeed] = useState<Feed>("trending");
+  const onFeedKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      !(event.target instanceof HTMLButtonElement) ||
+      event.target.getAttribute("role") !== "tab"
+    )
+      return;
+    const targetId = event.target.id;
+    const current = FEED_ORDER.findIndex(
+      (item) => targetId === `feed-tab-${item}`,
+    );
+    if (current === -1) return;
+    let next: Feed;
+    switch (event.key) {
+      case "ArrowRight":
+        next = FEED_ORDER[(current + 1) % FEED_ORDER.length];
+        break;
+      case "ArrowLeft":
+        next =
+          FEED_ORDER[(current + FEED_ORDER.length - 1) % FEED_ORDER.length];
+        break;
+      case "Home":
+        next = FEED_ORDER[0];
+        break;
+      case "End":
+        next = FEED_ORDER[FEED_ORDER.length - 1];
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    setFeed(next);
+    event.currentTarget
+      .querySelector<HTMLButtonElement>(`#feed-tab-${next}`)
+      ?.focus();
+  };
   const [view, setView] = useState<"grid" | "list">("grid");
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState<Modal>(null);
@@ -615,34 +666,51 @@ function App() {
             </div>
           </div>
           <div className="market-toolbar">
-            <div className="feed-tabs" role="tablist" aria-label="Token feed">
+            <div
+              className="feed-tabs"
+              role="tablist"
+              aria-label="Token feed"
+              onKeyDown={onFeedKeyDown}
+            >
               <button
+                id="feed-tab-trending"
                 role="tab"
+                aria-controls="token-feed-panel"
                 aria-selected={feed === "trending"}
+                tabIndex={feed === "trending" ? 0 : -1}
                 className={feed === "trending" ? "active" : ""}
                 onClick={() => setFeed("trending")}
               >
                 <Flame size={16} /> Trending
               </button>
               <button
+                id="feed-tab-new"
                 role="tab"
+                aria-controls="token-feed-panel"
                 aria-selected={feed === "new"}
+                tabIndex={feed === "new" ? 0 : -1}
                 className={feed === "new" ? "active" : ""}
                 onClick={() => setFeed("new")}
               >
                 <Clock3 size={16} /> New
               </button>
               <button
+                id="feed-tab-graduating"
                 role="tab"
+                aria-controls="token-feed-panel"
                 aria-selected={feed === "graduating"}
+                tabIndex={feed === "graduating" ? 0 : -1}
                 className={feed === "graduating" ? "active" : ""}
                 onClick={() => setFeed("graduating")}
               >
                 <Zap size={16} /> Graduating
               </button>
               <button
+                id="feed-tab-watchlist"
                 role="tab"
+                aria-controls="token-feed-panel"
                 aria-selected={feed === "watchlist"}
+                tabIndex={feed === "watchlist" ? 0 : -1}
                 className={feed === "watchlist" ? "active" : ""}
                 onClick={() => setFeed("watchlist")}
               >
@@ -677,34 +745,42 @@ function App() {
               </div>
             </div>
           </div>
-          {tokens.length > 0 ? (
-            <div className={`token-grid ${view === "list" ? "list-view" : ""}`}>
-              {tokens.map((token) => (
-                <TokenCard
-                  key={token.id}
-                  token={token}
-                  saved={saved.includes(token.id)}
-                  onOpen={() => setSelected(token)}
-                  onSave={() => toggleSaved(token.id)}
-                  view={view}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="empty-state">
-              <Compass size={28} />
-              <h3>
-                {feed === "watchlist" && !search
-                  ? "Your watchlist is empty"
-                  : "No tokens found"}
-              </h3>
-              <p>
-                {feed === "watchlist" && !search
-                  ? "Tap the heart on a token to save it here."
-                  : "Try another name or symbol."}
-              </p>
-            </div>
-          )}
+          <div
+            id="token-feed-panel"
+            role="tabpanel"
+            aria-labelledby={`feed-tab-${feed}`}
+          >
+            {tokens.length > 0 ? (
+              <div
+                className={`token-grid ${view === "list" ? "list-view" : ""}`}
+              >
+                {tokens.map((token) => (
+                  <TokenCard
+                    key={token.id}
+                    token={token}
+                    saved={saved.includes(token.id)}
+                    onOpen={() => setSelected(token)}
+                    onSave={() => toggleSaved(token.id)}
+                    view={view}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <Compass size={28} />
+                <h3>
+                  {feed === "watchlist" && !search
+                    ? "Your watchlist is empty"
+                    : "No tokens found"}
+                </h3>
+                <p>
+                  {feed === "watchlist" && !search
+                    ? "Tap the heart on a token to save it here."
+                    : "Try another name or symbol."}
+                </p>
+              </div>
+            )}
+          </div>
         </section>
 
         <section className="closing-cta container">

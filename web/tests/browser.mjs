@@ -154,6 +154,89 @@ try {
   assert.match(hillCopy, /No live leader/i);
   assert.match(hillCopy, /sample tokens below are not ranked/i);
 
+  // Tabs expose one keyboard stop and keep the active panel relationship.
+  assert.deepEqual(
+    await evaluate(
+      "[...document.querySelectorAll('[role=tab]')].map(tab => tab.tabIndex)",
+    ),
+    [0, -1, -1, -1],
+  );
+  await evaluate("document.getElementById('feed-tab-trending').focus()");
+  await send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "ArrowLeft",
+    code: "ArrowLeft",
+    windowsVirtualKeyCode: 37,
+  });
+  await until(
+    "document.getElementById('feed-tab-watchlist').getAttribute('aria-selected') === 'true'",
+  );
+  assert.equal(
+    await evaluate(
+      "document.activeElement.id === 'feed-tab-watchlist' && document.getElementById('token-feed-panel').getAttribute('aria-labelledby') === 'feed-tab-watchlist'",
+    ),
+    true,
+  );
+  await send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Home",
+    code: "Home",
+    windowsVirtualKeyCode: 36,
+  });
+  await until(
+    "document.getElementById('feed-tab-trending').getAttribute('aria-selected') === 'true'",
+  );
+
+  // Arrow navigation follows focus even when it is not on the selected tab.
+  await evaluate("document.getElementById('feed-tab-graduating').focus()");
+  await send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "ArrowRight",
+    code: "ArrowRight",
+    windowsVirtualKeyCode: 39,
+  });
+  await until(
+    "document.getElementById('feed-tab-watchlist').getAttribute('aria-selected') === 'true'",
+  );
+  assert.equal(
+    await evaluate("document.activeElement.id === 'feed-tab-watchlist'"),
+    true,
+  );
+  assert.deepEqual(
+    await evaluate(
+      "[...document.querySelectorAll('[role=tab]')].map(tab => tab.tabIndex)",
+    ),
+    [-1, -1, -1, 0],
+  );
+
+  await send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Home",
+    code: "Home",
+    windowsVirtualKeyCode: 36,
+  });
+  await until(
+    "document.getElementById('feed-tab-trending').getAttribute('aria-selected') === 'true'",
+  );
+  await send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "End",
+    code: "End",
+    windowsVirtualKeyCode: 35,
+  });
+  await until(
+    "document.getElementById('feed-tab-watchlist').getAttribute('aria-selected') === 'true'",
+  );
+  await send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "ArrowRight",
+    code: "ArrowRight",
+    windowsVirtualKeyCode: 39,
+  });
+  await until(
+    "document.getElementById('feed-tab-trending').getAttribute('aria-selected') === 'true'",
+  );
+
   // A malformed watchlist must not prevent React from rendering on reload.
   await evaluate(
     "localStorage.setItem('beam-watchlist', '{'); localStorage.setItem('beam-local-drafts', '{')",
