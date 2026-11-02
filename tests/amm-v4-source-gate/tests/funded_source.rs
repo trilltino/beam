@@ -10,7 +10,7 @@ use beam_program::{
     beam_amm_v4::{
         derive_pool_addresses, initialize2_instruction, user_lp_ata, Initialize2Accounts,
         Initialize2Args, MintKey, ASSOCIATED_TOKEN_PROGRAM_ID, DEVNET_PROGRAM_ID,
-        SPL_TOKEN_PROGRAM_ID,
+        MAINNET_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     trade_types::BondingCurve,
     Global,
@@ -22,6 +22,27 @@ use solana_sdk::{
     pubkey::Pubkey as SdkPubkey,
     signature::{Keypair, Signer},
     transaction::Transaction,
+};
+
+#[cfg(all(feature = "devnet", feature = "mainnet"))]
+compile_error!("select exactly one identity profile: devnet or mainnet");
+#[cfg(not(any(feature = "devnet", feature = "mainnet")))]
+compile_error!("select exactly one identity profile: devnet or mainnet");
+
+const PROFILE: &str = if cfg!(feature = "devnet") {
+    "devnet"
+} else {
+    "mainnet"
+};
+const AMM_ID: Pubkey = if cfg!(feature = "devnet") {
+    DEVNET_PROGRAM_ID
+} else {
+    MAINNET_PROGRAM_ID
+};
+const OTHER_AMM_ID: Pubkey = if cfg!(feature = "devnet") {
+    MAINNET_PROGRAM_ID
+} else {
+    DEVNET_PROGRAM_ID
 };
 
 const MINT: Pubkey = Pubkey::new_from_array([42; 32]);
@@ -38,6 +59,7 @@ const SETUP_DONATION: u64 = 17_000;
 const SETUP_BUDGET: u64 = 70_000_000;
 const MIGRATION_RECIPIENT: Pubkey = Pubkey::new_from_array([96; 32]);
 
+static OTHER_PROGRAM_CALLS: AtomicUsize = AtomicUsize::new(0);
 static CPI_CALLS: AtomicUsize = AtomicUsize::new(0);
 static SOURCE_SUCCESSES: AtomicUsize = AtomicUsize::new(0);
 static LATE_SOURCE_FAILURES: AtomicUsize = AtomicUsize::new(0);
@@ -136,6 +158,13 @@ fn beam_processor<'a>(id: &SdkPubkey, infos: &[AccountInfo<'a>], data: &[u8]) ->
     beam_program::entry(id, infos, data)
 }
 
+// An executable opposite-profile identity fixture. It must never execute;
+// this trap is not an AMM implementation and loads no captured binary.
+fn unexpected_profile<'a>(_: &SdkPubkey, _: &[AccountInfo<'a>], _: &[u8]) -> ProgramResult {
+    OTHER_PROGRAM_CALLS.fetch_add(1, Ordering::SeqCst);
+    Err(ProgramError::IncorrectProgramId)
+}
+
 fn pinned_raydium<'a>(id: &SdkPubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramResult {
     CPI_CALLS.fetch_add(1, Ordering::SeqCst);
     let fee_before = infos[13].lamports();
@@ -175,10 +204,22 @@ struct Fixture {
     admin: Keypair,
     instruction: SdkInstruction,
     pool: SdkPubkey,
+    observed_keys: Vec<SdkPubkey>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum IdentityMismatch {
+    #[default]
+    None,
+    Program,
+    ConfigAddress,
+    ConfigOwner,
+    FeeDestination,
 }
 
 #[derive(Clone, Copy, Default)]
 struct FundedCase {
+    identity: IdentityMismatch,
     base_source_donation: u64,
     wsol_source_donation: u64,
     curve_base_vault_donation: u64,
@@ -200,7 +241,16 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
         Pubkey::find_program_address(&[b"pool-authority", MINT.as_ref()], &beam_program::ID);
     let market =
         Pubkey::find_program_address(&[b"amm-v4-market", MINT.as_ref()], &beam_program::ID).0;
-    let pool = derive_pool_addresses(&DEVNET_PROGRAM_ID, &market).unwrap();
+    let pool = derive_pool_addresses(&AMM_ID, &market).unwrap();
+    let other = derive_pool_addresses(&OTHER_AMM_ID, &market).unwrap();
+    assert_eq!(
+        pool.config,
+        Pubkey::find_program_address(&[b"amm_config_account_seed"], &raydium_amm::id()).0
+    );
+    assert_eq!(
+        pool.create_pool_fee_destination,
+        raydium_amm::processor::config_feature::create_pool_fee_address::id()
+    );
     let curve =
         Pubkey::find_program_address(&[b"bonding-curve", MINT.as_ref()], &beam_program::ID).0;
     let global = Pubkey::find_program_address(&[b"global"], &beam_program::ID).0;
@@ -220,8 +270,8 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
         user_pc_source: user_lp_ata(&signer, &WSOL),
         user_lp_ata: user_lp_ata(&signer, &pool.lp_mint),
     };
-    let inner = initialize2_instruction(
-        DEVNET_PROGRAM_ID,
+    let mut inner = initialize2_instruction(
+        AMM_ID,
         &sources,
         Initialize2Args {
             open_time: 3,
@@ -230,6 +280,12 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
         },
     )
     .unwrap();
+    if matches!(case.identity, IdentityMismatch::ConfigAddress) {
+        inner.accounts[12].pubkey = other.config;
+    }
+    if matches!(case.identity, IdentityMismatch::FeeDestination) {
+        inner.accounts[13].pubkey = other.create_pool_fee_destination;
+    }
     let mut bank = ProgramTest::default();
     // Never select an ambient .so via BPF_OUT_DIR/SBF_OUT_DIR.
     bank.prefer_bpf(false);
@@ -240,8 +296,13 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
     );
     bank.add_program(
         "pinned_raydium_amm_v4",
-        sdk(DEVNET_PROGRAM_ID),
+        sdk(AMM_ID),
         processor!(pinned_raydium),
+    );
+    bank.add_program(
+        "opposite_profile_must_not_execute",
+        sdk(OTHER_AMM_ID),
+        processor!(unexpected_profile),
     );
     bank.add_program(
         "spl_token_7",
@@ -345,7 +406,15 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
             12 => {
                 let mut d = vec![0; 544];
                 put_u64(&mut d, 536, 50_000);
-                (DEVNET_PROGRAM_ID, 100_000_000, d, false)
+                let owner = if matches!(
+                    case.identity,
+                    IdentityMismatch::ConfigAddress | IdentityMismatch::ConfigOwner
+                ) {
+                    OTHER_AMM_ID
+                } else {
+                    AMM_ID
+                };
+                (owner, 100_000_000, d, false)
             }
             13 => (
                 SPL_TOKEN_PROGRAM_ID,
@@ -374,6 +443,11 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
         admin.pubkey(),
         account(system_program::ID, 100_000_000, vec![], false),
     );
+    let outer_program = if matches!(case.identity, IdentityMismatch::Program) {
+        OTHER_AMM_ID
+    } else {
+        AMM_ID
+    };
     let mut metas = vec![
         SdkMeta::new_readonly(sdk(global), false),
         SdkMeta::new(admin.pubkey(), true),
@@ -385,7 +459,7 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
         SdkMeta::new_readonly(sdk(WSOL), false),
         SdkMeta::new(sdk(sources.user_pc_source), false),
         SdkMeta::new(sdk(recipient), false),
-        SdkMeta::new_readonly(sdk(DEVNET_PROGRAM_ID), false),
+        SdkMeta::new_readonly(sdk(outer_program), false),
         SdkMeta::new_readonly(sdk(SPL_TOKEN_PROGRAM_ID), false),
         SdkMeta::new_readonly(sdk(system_program::ID), false),
     ];
@@ -410,11 +484,30 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
         }
         .data(),
     };
+    // Include every referenced account, plus both canonical profile config/
+    // fee destinations, so substitutions cannot hide changes on either side.
+    // The distinct transaction fee payer is intentionally excluded.
+    let mut observed_keys: Vec<_> = instruction
+        .accounts
+        .iter()
+        .map(|meta| meta.pubkey)
+        .collect();
+    observed_keys.extend([
+        sdk(pool.config),
+        sdk(pool.create_pool_fee_destination),
+        sdk(other.config),
+        sdk(other.create_pool_fee_destination),
+        sdk(AMM_ID),
+        sdk(OTHER_AMM_ID),
+    ]);
+    observed_keys.sort_unstable();
+    observed_keys.dedup();
     Fixture {
         bank: bank.start_with_context().await,
         admin,
         instruction,
         pool: sdk(pool.amm),
+        observed_keys,
     }
 }
 
@@ -451,26 +544,20 @@ async fn funded_attempt_with_budget(
 }
 
 async fn funded_state(f: &mut Fixture) -> Vec<Option<Account>> {
-    let indexes = [1, 3, 4, 5, 6, 8, 9, 17, 19, 22, 23, 24, 26, 28, 29, 30, 31];
     let mut state = Vec::new();
-    for index in indexes {
-        state.push(
-            f.bank
-                .banks_client
-                .get_account(f.instruction.accounts[index].pubkey)
-                .await
-                .unwrap(),
-        );
+    for key in &f.observed_keys {
+        state.push(f.bank.banks_client.get_account(*key).await.unwrap());
     }
     state
 }
 
 #[tokio::test]
 async fn beam_funded_diagnostic_reaches_compatible_pinned_source_and_always_rolls_back() {
+    OTHER_PROGRAM_CALLS.store(0, Ordering::SeqCst);
     CPI_CALLS.store(0, Ordering::SeqCst);
     SOURCE_SUCCESSES.store(0, Ordering::SeqCst);
     LATE_SOURCE_FAILURES.store(0, Ordering::SeqCst);
-    assert_eq!(raydium_amm::id(), DEVNET_PROGRAM_ID);
+    assert_eq!(raydium_amm::id(), AMM_ID);
     let mut f = funded_fixture(FundedCase::default()).await;
     let before = funded_state(&mut f).await;
     let result = funded_attempt(&mut f, 3).await;
@@ -598,5 +685,34 @@ async fn beam_funded_diagnostic_reaches_compatible_pinned_source_and_always_roll
         assert_eq!(CPI_CALLS.load(Ordering::SeqCst), calls);
         assert_eq!(funded_state(&mut invalid).await, before);
     }
-    println!("SOURCE_GATE: Beam {} -> Raydium 91739d8 source; 2 successful inner Initialize2 executions, terminal rollback, 1 late source failure and {} early refusals; Solana 2 dependency adaptation; native SPL Token 7 / ATA 6.", option_env!("BEAM_SOURCE_HEAD").unwrap_or("unrecorded"), if cfg!(feature = "mint-authority-guard") { 11 } else { 9 });
+    for (identity, code) in [
+        (IdentityMismatch::Program, 2012), // Anchor ConstraintAddress.
+        (IdentityMismatch::ConfigAddress, 7003),
+        (IdentityMismatch::ConfigOwner, 7003),
+        (IdentityMismatch::FeeDestination, 7003),
+    ] {
+        let mut invalid = funded_fixture(FundedCase {
+            identity,
+            ..FundedCase::default()
+        })
+        .await;
+        let before = funded_state(&mut invalid).await;
+        let calls = CPI_CALLS.load(Ordering::SeqCst);
+        let result = funded_attempt(&mut invalid, 3).await;
+        assert!(
+            result.contains(&format!("Custom({code})")),
+            "profile={PROFILE} mismatch={identity:?}: {result}"
+        );
+        assert_eq!(CPI_CALLS.load(Ordering::SeqCst), calls, "{identity:?}");
+        assert_eq!(
+            OTHER_PROGRAM_CALLS.load(Ordering::SeqCst),
+            0,
+            "{identity:?}"
+        );
+        assert_eq!(funded_state(&mut invalid).await, before, "{identity:?}");
+        println!("IDENTITY_REFUSAL: profile={PROFILE} mismatch={identity:?} error={code} both_programs_not_called state_unchanged");
+    }
+    assert_eq!(OTHER_PROGRAM_CALLS.load(Ordering::SeqCst), 0);
+    println!("IDENTITY_PROFILE: {PROFILE} program={AMM_ID} other_program={OTHER_AMM_ID}; 4 mismatched identities refused before Raydium");
+    println!("SOURCE_GATE: Beam {} -> Raydium 91739d8 source; 2 successful inner Initialize2 executions, terminal rollback, 1 late source failure and {} input refusals plus 4 identity refusals before Raydium; Solana 2 dependency adaptation; native SPL Token 7 / ATA 6.", option_env!("BEAM_SOURCE_HEAD").unwrap_or("unrecorded"), if cfg!(feature = "mint-authority-guard") { 11 } else { 9 });
 }

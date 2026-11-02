@@ -14,6 +14,7 @@ Migration remains disabled and the host-only Solana-target guard is intact.
 | Publication parent, mint/freeze-authority guard | `27000bcf248873c91fab5ddeb7aaba168e2d00f5` |
 | Raydium original Rust source | `91739d8d9f5cf347e0ce14ebe4d2bb7069fb31b6` |
 | arrform | `fdbb0cfe18eadbff99cc8cd63f1b5a43df70e665` |
+| First source-gate publication | `5d86ffad28c8f26dbdf9488fecedd39a5a05d7dd` |
 
 The [README](README.md#compatibility-adaptation) documents the separate
 test-only manifest: Solana 3 to 2.2.1, system-interface 3 to 1.0.0,
@@ -23,6 +24,28 @@ No captured program binary is loaded; native preference is explicitly set
 before registering the Beam, Raydium, SPL and ATA processors.
 
 ## Observed results
+
+The identity-matrix follow-up to `5d86ffad...` runs the actual Beam funded
+diagnostic and pinned Raydium processor with matched devnet and mainnet
+compile identities in separate native banks and target directories. Each
+profile passes the same two inner initializations followed by terminal Beam
+rollback, one late inner failure and eleven before-Raydium input refusals.
+Each also passes four identity-refusal cases: opposite program, opposite
+config address, wrong config owner and opposite fee destination. The
+opposite-program native trap is never called and the selected Raydium call
+counter is unchanged for every identity refusal.
+
+Snapshots now compare all referenced accounts plus both profiles' canonical
+config and fee accounts, including absent accounts; the distinct transaction
+fee payer remains excluded. Selecting both profiles or neither profile is
+an expected compile failure with the explicit profile-selection error. No
+new dependency, contract handler, archive change or economic/custody policy
+is introduced. The source-gate lockfile hash below is unchanged.
+
+The matrix runner and invalid-profile checks are repeated on the exact
+publication head; their full logs and independent review remain local.
+The earlier baseline/guard observations below are retained as historical
+evidence and are not relabeled as matrix-head host checks.
 
 | Check | Result |
 | --- | --- |
@@ -55,7 +78,17 @@ Use the source preparation and guarded runner commands in
 [README](README.md#run). Keep a different `CARGO_TARGET_DIR` for each standalone
 manifest/lockfile. After source preparation and `cargo fetch --locked`, the
 runner uses `--locked --offline`, checks source before and after execution,
-and records the actual Git head. Use another target for the original harness:
+and records the actual Git head.
+
+Run the new identity matrix with:
+
+```sh
+CARGO_TARGET_DIR=/workspace/beam-identity-matrix bash tests/amm-v4-source-gate/run_identity_matrix.sh /workspace/raydium-gate-source
+```
+
+The runner enables exactly one profile and the parent authority guard for
+each run. The source pin and dependency adaptation remain identical for both
+profiles. The earlier synthetic harness is separate:
 
 ```sh
 CARGO_TARGET_DIR=/workspace/beam-runtime-target cargo test --locked --manifest-path tests/runtime-harness/Cargo.toml --features amm-v4-probe --test amm_v4_cpi_probe --jobs 3 -- --test-threads=1

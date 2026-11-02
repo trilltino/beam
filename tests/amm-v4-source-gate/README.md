@@ -31,9 +31,12 @@ bank and ABI. The upstream manifest stays unchanged in the export.
 
 Other dependency requirements are retained and resolved by this gate's own
 lockfile. The upstream dev dependencies and release profiles are omitted;
-this gate builds native test code. The `devnet` feature matches Beam's
-default fixed AMM identity. The test uses native SPL Token 7 and ATA 6
-processors. `prefer_bpf(false)` is set **before** adding any processor so
+this gate builds native test code. The default `devnet` test feature selects
+both Beam's devnet identity and Raydium's devnet source constants; explicit
+`mainnet` selects the corresponding mainnet identities in this local bank.
+Both or neither test profiles are rejected at compile time. The test uses
+native SPL Token 7 and ATA 6 processors. `prefer_bpf(false)` is set
+**before** adding any processor so
 ambient `BPF_OUT_DIR`/`SBF_OUT_DIR` files cannot replace these source entries.
 
 This is **compatible pinned-source validation**, with synthetic accounts and
@@ -95,6 +98,31 @@ baseline; the reproduction command above includes it. Omit the feature only
 when reproducing the earlier baseline's nine-refusal gate. The runner records
 the actual Beam Git head in its output. These two controls are expected to fail
 against the earlier baseline and are not claimed as baseline protection.
+
+## Local identity matrix
+
+After the same source preparation and locked dependency fetch, run both
+profiles with separate build outputs:
+
+```sh
+CARGO_TARGET_DIR=/workspace/beam-identity-matrix bash tests/amm-v4-source-gate/run_identity_matrix.sh /workspace/raydium-gate-source
+```
+
+The runner uses `<target>/devnet` and `<target>/mainnet`. Its explicit features
+are `--no-default-features --features <profile>,mint-authority-guard`; the
+profile configures both Beam and the pinned Raydium source. This compiles
+native local tests using public mainnet/devnet addresses as fixture keys.
+It does not connect to either network or change a deployed program.
+
+Each profile repeats the two successful inner initializations with terminal
+rollback, one late inner failure and eleven input refusals. Four additional
+cases substitute the opposite-profile executable program, config address,
+config owner or fee destination. They assert the specific Beam/Anchor error,
+no new Raydium call, zero calls to an opposite-profile native trap and unchanged
+complete account snapshots. That trap only detects unexpected dispatch; it is
+not an AMM implementation. Every referenced account and both profiles'
+canonical config/fee accounts are snapshotted, including absent accounts;
+the distinct transaction fee payer remains excluded.
 
 The [validation record](VALIDATION.md) distinguishes the baseline and guard
 results and records the retained local evidence hashes.

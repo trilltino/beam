@@ -5,15 +5,18 @@ edition = "2021"
 publish = false
 
 [features]
+default = ["devnet"]
+devnet = ["beam-program/raydium-devnet", "raydium_amm/devnet"]
+mainnet = []
 mint-authority-guard = []
 
 [dependencies]
 anchor-lang = "=0.31.1"
-beam-program = { path = "../../programs/beam", features = ["amm-v4-probe"] }
+beam-program = { path = "../../programs/beam", default-features = false, features = ["amm-v4-probe"] }
 solana-program-test = "=2.2.1"
 solana-sdk = "=2.2.1"
 tokio = { version = "=1.43.0", features = ["macros", "rt-multi-thread"] }
-raydium_amm = { path = "raydium-compat", default-features = false, features = ["no-entrypoint", "devnet"] }
+raydium_amm = { path = "raydium-compat", default-features = false, features = ["no-entrypoint"] }
 spl-token = { version = "=7.0.0", features = ["no-entrypoint"] }
 spl-associated-token-account = { version = "=6.0.0", features = ["no-entrypoint"] }
 
