@@ -23,3 +23,12 @@ export function decodeBeamLaunchEvent(input) {
   }
   return decodeBeamEvent(bytes);
 }
+
+/** Local event meaning only; an IndexedEvent also needs authenticated context. */
+export function classifyBeamLaunchPayload(input) {
+  const event = decodeBeamLaunchEvent(input);
+  const kind = event.eventName === 'CreateEvent' ? 'create'
+    : event.eventName === 'CompleteEvent' ? 'curve_complete'
+      : event.data.isBuy ? 'buy' : 'sell';
+  return { kind, mint: event.data.mint };
+}

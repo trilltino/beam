@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { decodeBeamLaunchEvent } from './beam-launch-events.mjs';
+import { classifyBeamLaunchPayload, decodeBeamLaunchEvent } from './beam-launch-events.mjs';
 import { decodeBeamEvent } from './beam-events.mjs';
 import { decodeCompleteEvent } from './beam-native.mjs';
 
@@ -59,4 +59,24 @@ test('accepts byte views, rejects other inputs, and does not retain the input', 
   }
   assert.throws(() => decodeBeamLaunchEvent(new Uint8Array(1024 * 1024 + 1)),
     /SDK payload limit/);
+});
+
+test('local event kinds match the read-only feed vocabulary without inventing migration', () => {
+  const expected = new Map([
+    ['create-unicode', 'create'], ['create-empty', 'create'],
+    ['trade-mixed', 'buy'], ['trade-empty', 'sell'], ['trade-sequential', 'sell'],
+  ]);
+  for (const fixture of events.cases) {
+    const payload = bytes(fixture.dataHex);
+    const decoded = decodeBeamLaunchEvent(payload);
+    assert.deepEqual(classifyBeamLaunchPayload(payload), {
+      kind: expected.get(fixture.id), mint: decoded.data.mint,
+    }, fixture.id);
+  }
+  const complete = bytes(native.completeEvent.dataHex);
+  assert.deepEqual(classifyBeamLaunchPayload(complete), {
+    kind: 'curve_complete', mint: decodeCompleteEvent(complete).mint,
+  });
+  assert.throws(() => classifyBeamLaunchPayload(new Uint8Array(8)),
+    /unknown event discriminator/);
 });

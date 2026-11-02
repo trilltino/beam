@@ -5,6 +5,11 @@
 one complete Anchor event payload, including its eight-byte discriminator.
 `CompleteEvent` records **bonding-curve completion**, not migration to Raydium.
 Unknown events, event-CPI envelopes, truncated data, and trailing bytes fail.
+`classifyBeamLaunchPayload(bytes)` maps these local payloads to the read-only
+feed vocabulary (`create`, `buy`, `sell`, `curve_complete`) and returns their
+decoded mint. It never emits `migrate`. A web `IndexedEvent` still needs a
+separately authenticated program, transaction signature, event position,
+slot, source/finality and mint-to-curve association; this helper supplies none.
 
 This is a local SDK interface over previously compiled Anchor fixtures:
 `fixtures/events.json` and `fixtures/native-sol.json`. It adds no transaction,
