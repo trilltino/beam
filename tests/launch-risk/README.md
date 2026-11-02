@@ -65,6 +65,36 @@ refund rule are not Beam policy; the comparison does not prove that the
 batch is better for every honest user or resistant to wealthy coordinated
 buyers. Batch entry also adds wait/cancellation costs and possible censoring.
 
+`integer-batch.mjs` is a separate **exact-integer offline reference**. Test
+inputs explicitly set token lot size, quote units per lot, lot capacity,
+order budgets and slot deadlines. Demand is `floor(budget / lotPrice)`.
+When total demand exceeds capacity, each order receives
+`floor(capacity * demand / totalDemand)` lots; otherwise it receives its
+demand. Spent quote is `allocatedLots * lotPrice` and every remaining budget
+unit is a mock refund. Unallocated lots are retained, separated into unmet
+demand and pro-rata rounding; no wallet is awarded the last lot. The source
+tests check exact lot/quote conservation, deterministic order and tie handling,
+and 3,584 bounded split-budget scenarios. Splitting cannot increase a
+participant's combined allocated lots at fixed total budget and competing
+orders, although it can reduce its allocation. Wealthy actors can still
+dominate a common-price batch; this is not an identity or fairness guarantee.
+The 112-unit budget comparison uses a separately chosen 112-unit lot price:
+the first continuous 100-token buy costs 112, a later 100-token buy costs 140,
+and the later buyer could get only 82 tokens for 112 in that fixture. The
+batch gives each 112-unit budget one 100-token lot. It does **not** establish
+which launch price, capacity, lot granularity or waiting cost is acceptable.
+
+The reference journal serializes a plan digest and hash-chained events. A
+local in-memory compare-and-swap check rejects stale heads and duplicate
+claims; replaying a JSON journal reconstructs the same state. This models
+the checks a durable backend would need. Hashes do not authenticate a chain
+source or prevent two independent processes from committing competing forks:
+that requires atomic durable storage, which is absent. A stalled batch can be
+marked cancelled after its test deadline, and mock claim vouchers show full
+budget refunds. **No funds are held, sent, refunded or guaranteed to be
+recoverable.** No commit/reveal, censorship remedy, fee accounting, creator
+priority, direct CPI guard, LP policy or production parameter is implemented.
+
 Before any launch rule is chosen, run adversarial comparisons at equal budgets
 for creator-first access, same-slot multi-transaction bundles, split wallets,
 delayed sniping, fee-switch timing, direct CPI/router bypass, buy-then-dump,
