@@ -4,11 +4,14 @@
 //! Raydium binary runs. This is not Beam's migration entrypoint or a live CPI.
 use anchor_lang::solana_program::{
     account_info::AccountInfo,
+    bpf_loader_upgradeable,
     entrypoint::ProgramResult,
     instruction::{AccountMeta, Instruction},
     program::invoke_signed,
     program_error::ProgramError,
     pubkey,
+    pubkey::Pubkey,
+    system_program,
 };
 use beam_program::{
     beam_amm_v4::{
@@ -19,7 +22,10 @@ use beam_program::{
 };
 use solana_program_test::{processor, ProgramTest, ProgramTestContext};
 use solana_sdk::{
-    account::Account, bpf_loader_upgradeable, pubkey::Pubkey, signature::Signer, system_program,
+    account::Account,
+    instruction::{AccountMeta as SdkAccountMeta, Instruction as SdkInstruction},
+    pubkey::Pubkey as SdkPubkey,
+    signature::Signer,
     transaction::Transaction,
 };
 
@@ -34,6 +40,33 @@ const NATIVE_RENT: u64 = 3_000_000;
 const CLOCK_TIME: i64 = 100;
 const REPLAY: u32 = 99;
 const SNAPSHOT_REJECT: u32 = 100;
+
+// ProgramTest and the Anchor/Beam helpers can resolve distinct builds of
+// solana-pubkey in a shared target. Cross that test-only boundary by bytes;
+// never rely on identity between their Rust Pubkey/Instruction types.
+fn to_sdk(key: Pubkey) -> SdkPubkey {
+    SdkPubkey::new_from_array(key.to_bytes())
+}
+
+fn to_anchor(key: SdkPubkey) -> Pubkey {
+    Pubkey::new_from_array(key.to_bytes())
+}
+
+fn to_sdk_instruction(ix: Instruction) -> SdkInstruction {
+    SdkInstruction {
+        program_id: to_sdk(ix.program_id),
+        accounts: ix
+            .accounts
+            .into_iter()
+            .map(|meta| SdkAccountMeta {
+                pubkey: to_sdk(meta.pubkey),
+                is_signer: meta.is_signer,
+                is_writable: meta.is_writable,
+            })
+            .collect(),
+        data: ix.data,
+    }
+}
 
 fn wallet_pda() -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"pool-authority", BEAM_MINT.as_ref()], &beam_program::ID)
@@ -80,7 +113,7 @@ fn account(owner: Pubkey, lamports: u64, data: Vec<u8>, executable: bool) -> Acc
     Account {
         lamports,
         data,
-        owner,
+        owner: to_sdk(owner),
         executable,
         rent_epoch: 0,
     }
@@ -140,8 +173,9 @@ fn populate_pool(
 // The local Raydium-ID mock writes only pool and target-orders bytes. Pool
 // vaults, sources, LP and fee token accounts were seeded into the bank as
 // already settled values; the separate PR #33 harness tests their deltas.
-fn mock_amm<'a>(id: &Pubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramResult {
-    if *id != DEVNET_PROGRAM_ID
+fn mock_amm<'a>(id: &SdkPubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramResult {
+    let anchor_id = to_anchor(*id);
+    if anchor_id != DEVNET_PROGRAM_ID
         || infos.len() != 19
         || data.len() != 26
         || data[0] != 1
@@ -150,9 +184,9 @@ fn mock_amm<'a>(id: &Pubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramR
         return Err(ProgramError::InvalidInstructionData);
     }
     let open_time = read_u64(data, 2);
-    let p =
-        derive_pool_addresses(id, &MARKET_SEED).map_err(|_| ProgramError::InvalidAccountData)?;
-    if infos[4].owner == id {
+    let p = derive_pool_addresses(&anchor_id, &MARKET_SEED)
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    if infos[4].owner == &anchor_id {
         populate_pool(
             &mut infos[4].try_borrow_mut_data()?,
             p,
@@ -163,7 +197,7 @@ fn mock_amm<'a>(id: &Pubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramR
     // A real processor cannot modify a System-owned substituted target. Let
     // Beam's post-CPI owner check reject that fixture instead of relying on
     // the runtime's earlier foreign-owner write rejection.
-    if infos[11].owner == id {
+    if infos[11].owner == &anchor_id {
         let target = &mut *infos[11].try_borrow_mut_data()?;
         put_key(
             target,
@@ -179,8 +213,8 @@ fn mock_amm<'a>(id: &Pubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramR
 }
 
 // This is a test-only caller registered under Beam's ID, not beam_program::entry.
-fn mock_beam_caller<'a>(id: &Pubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramResult {
-    if *id != beam_program::ID || infos.len() != 21 || data.len() != 8 {
+fn mock_beam_caller<'a>(id: &SdkPubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramResult {
+    if to_anchor(*id) != beam_program::ID || infos.len() != 21 || data.len() != 8 {
         return Err(ProgramError::InvalidInstructionData);
     }
     if infos[20].try_borrow_data()?[0] == 1 {
@@ -294,13 +328,17 @@ async fn fixture(fault: Fault) -> Fixture {
     outer.accounts[15].is_signer = false;
     let mut bank = ProgramTest::new(
         "test_only_beam_snapshot",
-        beam_program::ID,
+        to_sdk(beam_program::ID),
         processor!(mock_beam_caller),
     );
     let rogue_fee = Pubkey::new_from_array([82; 32]);
     let rogue_market = Pubkey::new_from_array([83; 32]);
     let receipt = Pubkey::new_from_array([84; 32]);
-    bank.add_program("test_only_amm_v4", DEVNET_PROGRAM_ID, processor!(mock_amm));
+    bank.add_program(
+        "test_only_amm_v4",
+        to_sdk(DEVNET_PROGRAM_ID),
+        processor!(mock_amm),
+    );
     for (index, meta) in outer.accounts.iter().enumerate() {
         if matches!(index, 2 | 3) {
             continue;
@@ -410,10 +448,13 @@ async fn fixture(fault: Fault) -> Fixture {
             13 => NATIVE_RENT + 50_000 + u64::from(matches!(fault, Fault::FeeBacking)),
             _ => NATIVE_RENT,
         };
-        bank.add_account(meta.pubkey, account(owner, lamports, data, index <= 1));
+        bank.add_account(
+            to_sdk(meta.pubkey),
+            account(owner, lamports, data, index <= 1),
+        );
     }
     bank.add_account(
-        rogue_fee,
+        to_sdk(rogue_fee),
         account(
             SPL_TOKEN_PROGRAM_ID,
             NATIVE_RENT + 50_000,
@@ -422,11 +463,11 @@ async fn fixture(fault: Fault) -> Fixture {
         ),
     );
     bank.add_account(
-        rogue_market,
+        to_sdk(rogue_market),
         account(system_program::ID, NATIVE_RENT, Vec::new(), false),
     );
     bank.add_account(
-        receipt,
+        to_sdk(receipt),
         account(beam_program::ID, NATIVE_RENT, vec![0], false),
     );
     let context = bank.start_with_context().await;
@@ -465,7 +506,7 @@ fn tx(f: &Fixture, fault: Fault, open_time: u64) -> Transaction {
         ix.accounts[14].pubkey = f.rogue_market;
     }
     Transaction::new_signed_with_payer(
-        &[ix],
+        &[to_sdk_instruction(ix)],
         Some(&f.bank.payer.pubkey()),
         &[&f.bank.payer],
         f.bank.last_blockhash,
@@ -478,7 +519,7 @@ async fn state(f: &Fixture) -> Vec<Account> {
         out.push(
             f.bank
                 .banks_client
-                .get_account(*key)
+                .get_account(to_sdk(*key))
                 .await
                 .unwrap()
                 .unwrap(),
@@ -499,7 +540,7 @@ async fn snapshot_accepts_immediate_and_waiting_trade_without_real_raydium() {
         let pool = f
             .bank
             .banks_client
-            .get_account(f.pool)
+            .get_account(to_sdk(f.pool))
             .await
             .unwrap()
             .unwrap();
@@ -511,7 +552,7 @@ async fn snapshot_accepts_immediate_and_waiting_trade_without_real_raydium() {
         let target = f
             .bank
             .banks_client
-            .get_account(f.target)
+            .get_account(to_sdk(f.target))
             .await
             .unwrap()
             .unwrap();
@@ -519,7 +560,7 @@ async fn snapshot_accepts_immediate_and_waiting_trade_without_real_raydium() {
         let receipt = f
             .bank
             .banks_client
-            .get_account(f.receipt)
+            .get_account(to_sdk(f.receipt))
             .await
             .unwrap()
             .unwrap();
