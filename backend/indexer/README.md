@@ -85,6 +85,10 @@ in sample UI; do not strip its wrapper and publish it as a verified or live
 indexer page. Real enrichment requires a separately reviewed authenticated
 source, token-program and metadata proofs, transaction signatures, and
 reorg/finality handling.
+The local `web-contract.test.mjs` exercises the actual merged web parser on a
+combined tree. It skips on older stacked bases without `web/src/indexerAdapter.ts`;
+on main it asserts wrapper rejection, unverified-only parsing if a caller
+extracts the page, sample labeling and disabled transaction capabilities.
 
 ## Replay, finality and authorization boundary
 
