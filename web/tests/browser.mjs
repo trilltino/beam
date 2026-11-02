@@ -143,6 +143,49 @@ try {
   assert.match(hillCopy, /No live leader/i);
   assert.match(hillCopy, /sample tokens below are not ranked/i);
 
+  // Explore moves keyboard focus with the viewport and honors reduced motion.
+  await send("Emulation.setEmulatedMedia", {
+    media: "screen",
+    features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+  });
+  await evaluate(
+    "Element.prototype.scrollIntoView = function(options) { window.__beamScrollBehavior = options.behavior; }",
+  );
+  await evaluate("document.querySelector('.nav-active').click()");
+  assert.equal(
+    await evaluate(
+      "document.activeElement.id === 'explore' && document.activeElement.getAttribute('aria-labelledby') === 'explore-title' && window.__beamScrollBehavior === 'auto'",
+    ),
+    true,
+  );
+  await send("Emulation.setEmulatedMedia", { media: "screen", features: [] });
+  await evaluate("document.querySelector('.nav-active').click()");
+  assert.equal(await evaluate("window.__beamScrollBehavior"), "smooth");
+
+  const viewButtons = () =>
+    "[...document.querySelectorAll('.view-switch button')].map(button => button.getAttribute('aria-pressed'))";
+  assert.deepEqual(await evaluate(viewButtons()), ["true", "false"]);
+  await evaluate(
+    "document.querySelector('button[aria-label=\"List view\"]').click()",
+  );
+  await until(
+    "document.querySelector('.token-grid')?.classList.contains('list-view')",
+  );
+  assert.deepEqual(await evaluate(viewButtons()), ["false", "true"]);
+  await evaluate(
+    "document.querySelector('button[aria-label=\"Grid view\"]').click()",
+  );
+  await until(
+    "!document.querySelector('.token-grid')?.classList.contains('list-view')",
+  );
+  await evaluate("document.querySelectorAll('[role=tab]')[3].click()");
+  await until("!!document.querySelector('.empty-state[role=status]')");
+  assert.match(
+    await evaluate("document.querySelector('.empty-state').innerText"),
+    /Your watchlist is empty/,
+  );
+  await evaluate("document.querySelectorAll('[role=tab]')[0].click()");
+
   // A malformed watchlist must not prevent React from rendering on reload.
   await evaluate(
     "localStorage.setItem('beam-watchlist', '{'); localStorage.setItem('beam-local-drafts', '{')",
@@ -301,5 +344,10 @@ try {
 } finally {
   ws?.close();
   await Promise.all([stop(chrome), stop(preview)]);
-  await rm(profile, { recursive: true, force: true });
+  await rm(profile, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
 }

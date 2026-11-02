@@ -353,8 +353,16 @@ function App() {
 
   const toggleSaved = (id: string) =>
     setSaved((current) => toggleWatchlist(current, id));
-  const openExplore = () =>
-    document.getElementById("explore")?.scrollIntoView({ behavior: "smooth" });
+  const openExplore = () => {
+    const section = document.getElementById("explore");
+    if (!section) return;
+    section.focus({ preventScroll: true });
+    section.scrollIntoView({
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+    });
+  };
 
   const makeDraft = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -594,13 +602,18 @@ function App() {
           </div>
         </section>
 
-        <section className="market-section container" id="explore">
+        <section
+          className="market-section container"
+          id="explore"
+          tabIndex={-1}
+          aria-labelledby="explore-title"
+        >
           <div className="section-intro">
             <div>
               <div className="eyebrow section-eyebrow">
                 <span className="eyebrow-line" /> THE DISCOVERY FEED
               </div>
-              <h2>
+              <h2 id="explore-title">
                 Find the next <span>bright idea.</span>
               </h2>
               <p>Explore communities taking shape on Beam.</p>
@@ -659,6 +672,7 @@ function App() {
                   className={view === "grid" ? "selected" : ""}
                   onClick={() => setView("grid")}
                   aria-label="Grid view"
+                  aria-pressed={view === "grid"}
                 >
                   <Grid2X2 size={17} />
                 </button>
@@ -666,6 +680,7 @@ function App() {
                   className={view === "list" ? "selected" : ""}
                   onClick={() => setView("list")}
                   aria-label="List view"
+                  aria-pressed={view === "list"}
                 >
                   <List size={18} />
                 </button>
@@ -686,7 +701,7 @@ function App() {
               ))}
             </div>
           ) : (
-            <div className="empty-state">
+            <div className="empty-state" role="status">
               <Compass size={28} />
               <h3>
                 {feed === "watchlist" && !search
