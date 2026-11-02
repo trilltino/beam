@@ -146,6 +146,23 @@ test('stalled batch cancels after deadline and mock claims return full budgets o
     { kind: 'claim', slot: 7n, id: 'b' }), /duplicate/);
 });
 
+test('separate stores can fork from one history without a durable atomic CAS', () => {
+  const plan = planIntegerBatch(fixture([budget('a', 50n)]));
+  const original = new ResearchJournalStore(plan);
+  const restored = new ResearchJournalStore(plan,
+    JSON.parse(JSON.stringify(original.snapshot())));
+  const sameOldHead = original.snapshot().head;
+  original.commit(sameOldHead, { kind: 'settle', slot: 2n });
+  restored.commit(sameOldHead, { kind: 'settle', slot: 2n });
+  const claimA = original.commit(original.snapshot().head,
+    { kind: 'claim', slot: 3n, id: 'a' });
+  const claimB = restored.commit(restored.snapshot().head,
+    { kind: 'claim', slot: 3n, id: 'a' });
+  assert.deepEqual(claimA.voucher, claimB.voucher);
+  // A real service must serialize commits in a durable store; this class
+  // cannot arbitrate independent stores or authenticate who may claim.
+});
+
 test('journal tampering, wrong plan and malformed input fail closed', () => {
   const plan = planIntegerBatch(fixture([budget('a', 50n)]));
   const store = new ResearchJournalStore(plan);
@@ -162,6 +179,8 @@ test('journal tampering, wrong plan and malformed input fail closed', () => {
     { lotPriceQuoteUnits: 0n })), /positive/);
   assert.throws(() => planIntegerBatch(fixture([budget('a', 1n)],
     { closeSlot: 5n })), /deadline/);
+  assert.throws(() => planIntegerBatch(fixture([budget('a', 1n)],
+    { settlementDeadlineSlot: (1n << 64n) - 1n })), /cancellation slot/);
   const sparse = new Array(2);
   sparse[0] = budget('a', 1n);
   assert.throws(() => planIntegerBatch(fixture(sparse)), /dense/);

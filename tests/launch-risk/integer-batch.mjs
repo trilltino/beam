@@ -75,7 +75,9 @@ export function planIntegerBatch(input) {
   const open = u64(input.openSlot, 'openSlot');
   const close = u64(input.closeSlot, 'closeSlot');
   const deadline = u64(input.settlementDeadlineSlot, 'settlementDeadlineSlot');
-  if (!(open < close && close < deadline)) throw new RangeError('invalid deadline order');
+  if (!(open < close && close < deadline) || deadline === U64_MAX) {
+    throw new RangeError('invalid deadline order or no representable cancellation slot');
+  }
   denseArray(input.orders, 'orders');
   if (input.orders.length === 0) throw new TypeError('orders cannot be empty');
   const ids = new Set();

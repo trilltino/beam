@@ -51,8 +51,9 @@ rounding can alter who would owe or receive integer quote units. A sorted
 test label settles ties without a per-wallet bonus; it is not an identity
 check. After a synthetic deadline, a stalled open batch can be cancelled and
 each mock claimant can request its full budget once along one in-memory state
-chain. A consumed snapshot cannot be reused by this process, but there is no
-durable replay protection, cross-process coordination or actual refund. This
+chain. The rational model rejects reuse of the same consumed state object,
+but separate restored histories can still fork; there is no durable replay
+protection, cross-process coordination or actual refund. This
 only demonstrates a required liveness branch.
 The implementation uses arbitrary-precision `BigInt`; accepting u64 inputs
 does not prove u128 or on-chain arithmetic bounds for a real batch program.
