@@ -1,7 +1,7 @@
 // Client-side PDA/consistency guard for a separately authenticated creator.
 // It does not authenticate chain data or authorize a fee claim.
 import { decodeBase58Pubkey } from './beam-native.mjs';
-import { buildCollectCreatorFee } from './beam-creator.mjs';
+import { buildCollectCreatorFee, previewCollectCreatorFee } from './beam-creator.mjs';
 import { deriveCreatorVault, deriveEventAuthority } from './beam-pdas.mjs';
 
 function expectedPair(value) {
@@ -24,12 +24,17 @@ function expectedPair(value) {
   }));
 }
 
-export function buildCollectCreatorFeeForExpectedRecipient(config, accounts, expected) {
-  if (arguments.length !== 3) throw new TypeError('expected config, accounts and recipient pair');
+function canonicalExpectedPair(expected) {
   const pair = expectedPair(expected);
   if (pair.creatorVault !== deriveCreatorVault(pair.creator).address) {
     throw new RangeError('expected creator vault is not the canonical PDA');
   }
+  return pair;
+}
+
+export function buildCollectCreatorFeeForExpectedRecipient(config, accounts, expected) {
+  if (arguments.length !== 3) throw new TypeError('expected config, accounts and recipient pair');
+  const pair = canonicalExpectedPair(expected);
   const instruction = buildCollectCreatorFee(config, accounts);
   if (instruction.keys[0].pubkey !== pair.creator
       || instruction.keys[1].pubkey !== pair.creatorVault) {
@@ -39,4 +44,14 @@ export function buildCollectCreatorFeeForExpectedRecipient(config, accounts, exp
     throw new RangeError('event authority is not the canonical PDA');
   }
   return instruction;
+}
+
+export function previewCollectCreatorFeeForExpectedRecipient(config, snapshot, expected) {
+  if (arguments.length !== 3) throw new TypeError('expected config, snapshot and recipient pair');
+  const pair = canonicalExpectedPair(expected);
+  const preview = previewCollectCreatorFee(config, snapshot);
+  if (preview.creator !== pair.creator || preview.creatorVault !== pair.creatorVault) {
+    throw new RangeError('preview creator or vault differs from expected recipient pair');
+  }
+  return preview;
 }

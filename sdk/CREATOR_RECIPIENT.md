@@ -8,6 +8,12 @@ pair, a noncanonical creator-vault PDA, or a substituted event-authority PDA.
 It keeps the five-account, no-creator-signature ABI unchanged. It does not
 add a payout-wallet field or alter creator fees.
 
+`previewCollectCreatorFeeForExpectedRecipient` applies the same canonical
+expected pair to PR #13's caller-supplied local rent/balance preview. It
+rejects a substituted creator or vault and retains the preview's own slot-age
+and numeric checks. A matching preview still does not authenticate balances,
+the curve, or any actual fee entitlement.
+
 The caller must authenticate the curve's creator from trusted chain data.
 The helper derives the vault from `[b"creator-vault", creator]` and checks the
 event-authority PDA for the configured Beam program. It does not verify the

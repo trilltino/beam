@@ -4,9 +4,11 @@ import { readFileSync } from 'node:fs';
 import { encodeBase58Pubkey } from './beam-native.mjs';
 import { deriveCreatorVault, deriveEventAuthority } from './beam-pdas.mjs';
 import {
-  CREATOR_SOURCE_COMMIT, CREATOR_PROGRAM_ID, buildCollectCreatorFee,
+  CREATOR_SOURCE_COMMIT, CREATOR_PROGRAM_ID, buildCollectCreatorFee, previewCollectCreatorFee,
 } from './beam-creator.mjs';
-import { buildCollectCreatorFeeForExpectedRecipient } from './beam-creator-recipient.mjs';
+import {
+  buildCollectCreatorFeeForExpectedRecipient, previewCollectCreatorFeeForExpectedRecipient,
+} from './beam-creator-recipient.mjs';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/creator-native-sol.json', import.meta.url)));
 const accounts = {
@@ -17,6 +19,14 @@ const accounts = {
 const config = { sourceCommit: CREATOR_SOURCE_COMMIT, programId: CREATOR_PROGRAM_ID };
 const expected = { creator: accounts.creator, creatorVault: accounts.creatorVault };
 const other = encodeBase58Pubkey(new Uint8Array(32).fill(9));
+const snapshot = (changes = {}) => ({
+  creator: accounts.creator, creatorVault: accounts.creatorVault,
+  creatorOwner: accounts.systemProgram, creatorExecutable: false,
+  creatorLamports: 5n, creatorRentMinimum: 10n,
+  vaultLamports: 105n, vaultZeroDataRentMinimum: 100n,
+  observedSlot: 100n, referenceSlot: 105n, maxSlotAge: 5n,
+  ...changes,
+});
 
 test('a canonical expected recipient pair keeps the exact permissionless claim ABI', () => {
   const bound = buildCollectCreatorFeeForExpectedRecipient(config, accounts, expected);
@@ -73,4 +83,30 @@ test('expected recipient must contain exact own data fields', () => {
   assert.equal(called, false);
   assert.throws(() => buildCollectCreatorFeeForExpectedRecipient(config, accounts, { ...expected, creator: '0' }), /base58/);
   assert.throws(() => buildCollectCreatorFeeForExpectedRecipient(config, accounts), /expected config/);
+});
+
+test('claim preview stays bound to the same canonical recipient pair', () => {
+  const observed = snapshot();
+  assert.deepEqual(
+    previewCollectCreatorFeeForExpectedRecipient(config, observed, expected),
+    previewCollectCreatorFee(config, observed),
+  );
+  for (const changed of [
+    { creator: other }, { creatorVault: other },
+    { creator: other, creatorVault: other },
+  ]) {
+    assert.throws(
+      () => previewCollectCreatorFeeForExpectedRecipient(config, snapshot(changed), expected),
+      /preview creator or vault differs from expected recipient pair/,
+    );
+  }
+  assert.throws(
+    () => previewCollectCreatorFeeForExpectedRecipient(config, observed,
+      { ...expected, creatorVault: other }),
+    /expected creator vault is not the canonical PDA/,
+  );
+  assert.throws(
+    () => previewCollectCreatorFeeForExpectedRecipient(config, snapshot({ observedSlot: 99n }), expected),
+    /snapshot is stale/,
+  );
 });
