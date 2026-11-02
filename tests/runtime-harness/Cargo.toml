@@ -8,6 +8,7 @@ publish = false
 default = []
 experimental-raydium = ["beam-program/experimental-raydium"]
 amm-v4-probe = ["beam-program/amm-v4-probe"]
+beam-sbf = []
 
 [dependencies]
 anchor-lang = "=0.31.1"

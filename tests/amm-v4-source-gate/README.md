@@ -45,6 +45,12 @@ test, deployed-bytecode validation, a committed migration, or Token-2022
 graduation evidence. LP custody, principal/fee rights, recipient policy and
 mutable Global entitlement limitations remain unresolved.
 
+The opt-in `sbf-raydium` backend separately loads the newly compiled original
+Raydium ELF with its original dependency graph. It keeps Beam's diagnostic
+and SPL/ATA native. See the [SBF gate instructions](../sbf-support/README.md)
+for the compiled default Beam gate, original Raydium SBF profiles and the
+different evidence levels. The default native backend above is unchanged.
+
 ## Run
 
 Use a separately approved official Rust toolchain (verified here with
@@ -134,6 +140,8 @@ No `cargo build-sbf` was invoked. The published official
 SHA-256 `2721d1d4d623e43f0f0193b07c60455b45b039cb392931bed5c03af39874a257`).
 Its `src/post_processing.rs` calls `generate_keypair` when a program keypair
 is absent in either release or debug mode. No documented compile-only switch
-was established in this inspection. This gate therefore uses the compatible
-native source approach; it does not patch the builder or generate a program
-keypair. Beam's `amm-v4-probe` Solana-target compile guard remains intact.
+was established in this inspection. This gate uses the compatible native
+source approach by default; it does not patch the builder or generate a
+program keypair. Later source-built SBF tests use direct Cargo with the
+specifically approved official toolchain, as documented separately. Beam's
+`amm-v4-probe` Solana-target compile guard remains intact.

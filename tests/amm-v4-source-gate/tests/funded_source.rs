@@ -1,4 +1,7 @@
 //! Local-only source compatibility gate; always rolls back.
+#[cfg(feature = "sbf-raydium")]
+#[path = "../../sbf-support/artifact.rs"]
+mod sbf_artifact;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anchor_lang::solana_program::{
@@ -294,11 +297,14 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
         sdk(beam_program::ID),
         processor!(beam_processor),
     );
+    #[cfg(not(feature = "sbf-raydium"))]
     bank.add_program(
         "pinned_raydium_amm_v4",
         sdk(AMM_ID),
         processor!(pinned_raydium),
     );
+    #[cfg(feature = "sbf-raydium")]
+    bank.add_account(sdk(AMM_ID), sbf_artifact::account("RAYDIUM_SBF"));
     bank.add_program(
         "opposite_profile_must_not_execute",
         sdk(OTHER_AMM_ID),
@@ -533,14 +539,98 @@ async fn funded_attempt_with_budget(
         &[&f.bank.payer, &f.admin],
         f.bank.last_blockhash,
     );
-    format!(
-        "{:?}",
-        f.bank
-            .banks_client
-            .process_transaction(tx)
-            .await
-            .unwrap_err()
-    )
+    let processed = f
+        .bank
+        .banks_client
+        .process_transaction_with_metadata(tx)
+        .await
+        .unwrap();
+    #[cfg(feature = "sbf-raydium")]
+    {
+        let metadata = processed
+            .metadata
+            .as_ref()
+            .expect("transaction metadata required");
+        // ProgramTest's native bridge can repeat adjacent lifecycle events.
+        // Normalize only those duplicates before counting inner invocations.
+        let mut normalized = Vec::new();
+        for log in &metadata.log_messages {
+            let lifecycle = log
+                .strip_prefix("Program ")
+                .and_then(|line| line.split_once(' '))
+                .is_some_and(|(id, event)| {
+                    id != "log:"
+                        && id != "data:"
+                        && (event.starts_with("invoke [")
+                            || event == "success"
+                            || event.starts_with("failed: ")
+                            || event.starts_with("consumed "))
+                });
+            if !lifecycle || normalized.last() != Some(log) {
+                normalized.push(log.clone());
+            }
+        }
+        let logs = &normalized;
+        for log in logs {
+            println!("SBF_TRACE: {log}");
+        }
+        let entered = format!("Program {AMM_ID} invoke [2]");
+        let success = format!("Program {AMM_ID} success");
+        let count = logs.iter().filter(|log| **log == entered).count();
+        assert!(count <= 1, "unexpected repeated Raydium CPI");
+        CPI_CALLS.fetch_add(count, Ordering::SeqCst);
+        SOURCE_SUCCESSES.fetch_add(
+            logs.iter().filter(|log| **log == success).count(),
+            Ordering::SeqCst,
+        );
+        if let Some(start) = logs.iter().position(|log| *log == entered) {
+            let inner = &logs[start..];
+            assert!(
+                inner
+                    .iter()
+                    .any(|log| log.starts_with(&format!("Program {AMM_ID} consumed "))),
+                "expected SBF compute metering"
+            );
+            if inner
+                .iter()
+                .any(|log| *log == format!("Program {AMM_ID} failed: custom program error: 0x1"))
+            {
+                // Log evidence of the late failing path, not direct observation
+                // of intermediate SBF account bytes or fee/reserve deltas.
+                assert_eq!(
+                    inner
+                        .iter()
+                        .filter(|log| **log == format!("Program {SPL_TOKEN_PROGRAM_ID} invoke [3]"))
+                        .count(),
+                    4
+                );
+                assert_eq!(
+                    inner
+                        .iter()
+                        .filter(|log| **log == format!("Program {SPL_TOKEN_PROGRAM_ID} success"))
+                        .count(),
+                    4
+                );
+                assert_eq!(
+                    inner
+                        .iter()
+                        .filter(|log| **log == format!("Program {} invoke [3]", system_program::ID))
+                        .count(),
+                    14 // fee + four transfer/allocate/assign sequences + failing pool funding.
+                );
+                assert_eq!(
+                    inner
+                        .iter()
+                        .filter(|log| **log == format!("Program {} success", system_program::ID))
+                        .count(),
+                    13
+                );
+                LATE_SOURCE_FAILURES.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        assert!(metadata.compute_units_consumed > 0);
+    }
+    format!("{:?}", processed.result.unwrap_err())
 }
 
 async fn funded_state(f: &mut Fixture) -> Vec<Option<Account>> {
@@ -714,5 +804,13 @@ async fn beam_funded_diagnostic_reaches_compatible_pinned_source_and_always_roll
     }
     assert_eq!(OTHER_PROGRAM_CALLS.load(Ordering::SeqCst), 0);
     println!("IDENTITY_PROFILE: {PROFILE} program={AMM_ID} other_program={OTHER_AMM_ID}; 4 mismatched identities refused before Raydium");
-    println!("SOURCE_GATE: Beam {} -> Raydium 91739d8 source; 2 successful inner Initialize2 executions, terminal rollback, 1 late source failure and {} input refusals plus 4 identity refusals before Raydium; Solana 2 dependency adaptation; native SPL Token 7 / ATA 6.", option_env!("BEAM_SOURCE_HEAD").unwrap_or("unrecorded"), if cfg!(feature = "mint-authority-guard") { 11 } else { 9 });
+    println!(
+        "RAYDIUM_BACKEND: {}",
+        if cfg!(feature = "sbf-raydium") {
+            "locally compiled pinned Raydium SBF with unchanged original manifest/lock; Beam diagnostic and SPL/ATA native; inner flow evidenced by logs, intermediate deltas not directly inspected"
+        } else {
+            "compatible native source with direct intermediate assertions"
+        }
+    );
+    println!("SOURCE_GATE: Beam {} -> Raydium 91739d8 source; 2 successful inner Initialize2 executions, terminal rollback, 1 late source failure and {} input refusals plus 4 identity refusals before Raydium; host Solana 2; native SPL Token 7 / ATA 6; Raydium backend identified above.", option_env!("BEAM_SOURCE_HEAD").unwrap_or("unrecorded"), if cfg!(feature = "mint-authority-guard") { 11 } else { 9 });
 }

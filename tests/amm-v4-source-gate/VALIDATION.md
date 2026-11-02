@@ -47,6 +47,26 @@ publication head; their full logs and independent review remain local.
 The earlier baseline/guard observations below are retained as historical
 evidence and are not relabeled as matrix-head host checks.
 
+### Source-built SBF follow-up
+
+Using verified official Anza platform-tools v1.57 and direct locked Cargo,
+the unmodified default Beam program and both original Raydium identity
+profiles compile for SBPF v0. The Beam SBF gate passes 4/4 (existing retired
+adapter gate/authority/rollback cases plus rejection of the absent funded
+diagnostic). Native Beam's funded diagnostic cross-program invokes each
+original Raydium SBF profile in a single bank; both complete the existing
+two inner successes, late failure, input/identity refusals and rollback checks.
+
+The SBF backend counts invocation/success and compute metering from transaction
+metadata, normalizing adjacent duplicated lifecycle events from ProgramTest's
+native bridge. Its late-failure evidence is inner call-flow logs and final
+rollback, not direct inspection of intermediate SBF account or fee deltas.
+No diagnostic guard exception or SBF test variant was created. This does not
+prove a compiled Beam migration CPI or identify deployed production binaries.
+The production diagnostic SBF compile refusal and wrong-ELF-hash rejection
+were also observed. Full receipts and logs stay local; artifact/tool/source
+pins and reproduction commands are in [SBF support](../sbf-support/README.md).
+
 | Check | Result |
 | --- | --- |
 | Baseline source gate, feature omitted | 1/1 pass: two inner initializations, terminal rollback, one late inner failure, nine pre-CPI refusals |

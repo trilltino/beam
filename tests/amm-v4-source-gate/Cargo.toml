@@ -9,6 +9,7 @@ default = ["devnet"]
 devnet = ["beam-program/raydium-devnet", "raydium_amm/devnet"]
 mainnet = []
 mint-authority-guard = []
+sbf-raydium = []
 
 [dependencies]
 anchor-lang = "=0.31.1"

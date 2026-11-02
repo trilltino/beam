@@ -2,6 +2,10 @@
 //! The user selected AMM v4. These synthetic transactions never invoke the
 //! Raydium program, do not test a migration CPI, and do not establish safety
 //! or behavior of any deployed Raydium binary.
+#[cfg(feature = "beam-sbf")]
+#[path = "../../sbf-support/artifact.rs"]
+mod sbf_artifact;
+
 use anchor_lang::{AccountDeserialize, AccountSerialize, Discriminator, InstructionData};
 use anchor_lang::solana_program::{account_info::AccountInfo, entrypoint::ProgramResult};
 use beam_program::{beam_raydium::{BeamRaydiumConfig, RAYDIUM_ID}, Global};
@@ -76,6 +80,16 @@ fn beam_processor<'a>(program_id: &Pubkey, accounts: &[AccountInfo<'a>], data: &
     beam_program::entry(program_id, accounts, data)
 }
 
+fn beam_bank() -> ProgramTest {
+    let mut bank = ProgramTest::default();
+    bank.prefer_bpf(false);
+    #[cfg(feature = "beam-sbf")]
+    bank.add_account(beam_program::ID, sbf_artifact::account("BEAM_SBF"));
+    #[cfg(not(feature = "beam-sbf"))]
+    bank.add_program("beam_program", beam_program::ID, processor!(beam_processor));
+    bank
+}
+
 async fn fixture(initially_enabled: bool) -> (ProgramTestContext, Keypair, Keypair) {
     let admin = Keypair::new();
     let other = Keypair::new();
@@ -88,7 +102,7 @@ async fn fixture(initially_enabled: bool) -> (ProgramTestContext, Keypair, Keypa
     .try_serialize(&mut config_data)
     .unwrap();
 
-    let mut bank = ProgramTest::new("beam_program", beam_program::ID, processor!(beam_processor));
+    let mut bank = beam_bank();
     bank.add_account(global_pda(), synthetic_global(admin.pubkey()));
     bank.add_account(config_pda(), Account {
         lamports: 100_000_000,
@@ -117,7 +131,7 @@ async fn configure_fixture(disable_create_pool: bool) -> (ProgramTestContext, Ke
     data[..8].copy_from_slice(&anchor_lang::solana_program::hash::hash(b"account:AmmConfig").to_bytes()[..8]);
     data[9] = u8::from(disable_create_pool);
     data[10..12].copy_from_slice(&index.to_le_bytes());
-    let mut bank = ProgramTest::new("beam_program", beam_program::ID, processor!(beam_processor));
+    let mut bank = beam_bank();
     bank.add_account(global_pda(), synthetic_global(admin.pubkey()));
     bank.add_account(amm_config, Account {
         lamports: 100_000_000,
@@ -212,4 +226,44 @@ async fn failed_enable_rolls_back_prior_disable_of_legacy_state() {
     let disable = signed_tx(&bank, &admin, &[set_enabled(admin.pubkey(), false)]);
     bank.banks_client.process_transaction(disable).await.unwrap();
     assert!(!config_enabled(&mut bank).await);
+}
+
+#[cfg(feature = "beam-sbf")]
+#[tokio::test]
+async fn compiled_default_beam_excludes_funded_diagnostic() {
+    let (mut bank, _, _) = fixture(false).await;
+    let before = bank.banks_client.get_account(config_pda()).await.unwrap();
+    let discriminator =
+        solana_sdk::hash::hash(b"global:probe_amm_v4_funded_initialize2").to_bytes();
+    let instruction = Instruction {
+        program_id: beam_program::ID,
+        accounts: vec![],
+        data: discriminator[..8].to_vec(),
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[instruction],
+        Some(&bank.payer.pubkey()),
+        &[&bank.payer],
+        bank.last_blockhash,
+    );
+    let result = bank
+        .banks_client
+        .process_transaction_with_metadata(tx)
+        .await
+        .unwrap();
+    assert!(format!("{:?}", result.result.unwrap_err()).contains("Custom(101)"));
+    let logs = result
+        .metadata
+        .expect("SBF execution metadata required")
+        .log_messages;
+    assert!(logs
+        .iter()
+        .any(|log| log.starts_with(&format!("Program {} consumed ", beam_program::ID))));
+    assert_eq!(
+        bank.banks_client.get_account(config_pda()).await.unwrap(),
+        before
+    );
+    println!(
+        "COMPILED_BEAM_GATE: default ELF excludes funded diagnostic (Anchor101), config unchanged"
+    );
 }
