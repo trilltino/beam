@@ -7,6 +7,8 @@ import {
 export const BLOCK_VERSION = 'beam-indexer-block/v1';
 export const QUERY_VERSION = 'beam-indexer-query/v1';
 const U64_MAX = (1n << 64n) - 1n;
+const NATIVE_QUOTE = '11111111111111111111111111111111';
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const RANK = Object.freeze({ processed: 0, confirmed: 1, finalized: 2 });
 const DEFAULTS = Object.freeze({ maxBlocks: 128, maxRecords: 8192, maxRecordsPerBlock: 256, maxBatchBlocks: 64 });
 const MAXIMUMS = Object.freeze({ maxBlocks: 1024, maxRecords: 65536, maxRecordsPerBlock: 2048, maxBatchBlocks: 128 });
@@ -71,6 +73,25 @@ function key(value, name) {
   } catch {
     fail('INVALID_ARGUMENT', `${name} must be a canonical 32-byte base58 value`);
   }
+  return value;
+}
+
+function signature(value) {
+  if (typeof value !== 'string' || value.length < 64 || value.length > 88) fail('INVALID_ARGUMENT', 'synthetic signature must be a 64-byte base58 value');
+  let number = 0n;
+  for (const character of value) {
+    const digit = BASE58.indexOf(character);
+    if (digit < 0) fail('INVALID_ARGUMENT', 'synthetic signature has invalid base58');
+    number = number * 58n + BigInt(digit);
+  }
+  let bytes = 0;
+  while (number > 0n) { number >>= 8n; bytes += 1; }
+  if ((value.match(/^1*/)?.[0].length ?? 0) + bytes !== 64) fail('INVALID_ARGUMENT', 'synthetic signature must decode to 64 bytes');
+  return value;
+}
+
+function utf8(value, maximum, name) {
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > maximum) fail('INVALID_ARGUMENT', `${name} exceeds its UTF-8 byte bound`);
   return value;
 }
 
@@ -371,6 +392,62 @@ class FixtureIndexer {
       ...(has(options, 'commitment') ? { commitment: options.commitment } : {}) });
     return detached({ ...this.describe(), item: this.#matching(filters).at(-1) ?? null });
   }
+
+  /** Build a sample-only web-shaped page from explicit, unverified fixture assertions. */
+  syntheticWebFixture(evidence) {
+    object(evidence, ['kind', 'sourceId', 'indexedAtMs', 'metadata', 'event'], [], 'fixture evidence');
+    if (evidence.kind !== 'synthetic-fixture' || evidence.sourceId !== this.#sourceId) fail('PROVENANCE', 'synthetic source does not match this indexer');
+    integer(evidence.indexedAtMs, Number.MAX_SAFE_INTEGER, 'indexedAtMs');
+    object(evidence.metadata, ['mint', 'curveAccount', 'quoteMint', 'tokenProgram', 'creator', 'name', 'symbol', 'metadataUri'], [], 'synthetic metadata');
+    object(evidence.event, ['recordId', 'signature', 'eventIndex'], [], 'synthetic event assertion');
+    const mint = key(evidence.metadata.mint, 'mint');
+    const curveAccount = key(evidence.metadata.curveAccount, 'curveAccount');
+    const creator = key(evidence.metadata.creator, 'creator');
+    const quoteMint = evidence.metadata.quoteMint === null ? null : key(evidence.metadata.quoteMint, 'quoteMint');
+    if (!['spl_token', 'token_2022'].includes(evidence.metadata.tokenProgram)) fail('INVALID_ARGUMENT', 'unsupported token-program assertion');
+    const name = utf8(evidence.metadata.name, 32, 'name');
+    const symbol = utf8(evidence.metadata.symbol, 13, 'symbol');
+    const metadataUri = utf8(evidence.metadata.metadataUri, 200, 'metadataUri');
+    const assertedSignature = signature(evidence.event.signature);
+    const eventIndex = integer(evidence.event.eventIndex, 10000, 'eventIndex');
+    if (typeof evidence.event.recordId !== 'string') fail('INVALID_ARGUMENT', 'event record ID is required');
+    const description = this.describe();
+    if (description.status.state !== 'fixture-ready' || !description.tip) fail('UNAVAILABLE', 'fixture source is not ready');
+    const completion = this.query({ kind: 'complete-event', mint, limit: 2 });
+    if (completion.items.length !== 1 || completion.nextCursor !== null) fail('CONFLICT', 'expected exactly one retained completion event for mint');
+    const event = completion.items[0];
+    const snapshot = this.latestCurve(curveAccount);
+    const curve = snapshot.item;
+    if (!curve || event.id !== evidence.event.recordId || event.decoded.bondingCurve !== curveAccount
+      || event.decoded.quoteMint !== curve.decoded.quoteMint || curve.address !== curveAccount
+      || curve.owner !== PROGRAM_ID || curve.decoded.creator !== creator || !curve.decoded.complete
+      || curve.decoded.isMayhemMode || curve.decoded.isCashbackCoin
+      || BigInt(curve.block.slot) < BigInt(event.block.slot)
+      || (curve.block.slot === event.block.slot && curve.block.hash !== event.block.hash)
+      || (quoteMint === null ? event.decoded.quoteMint !== NATIVE_QUOTE : event.decoded.quoteMint !== quoteMint)
+      || completion.stateDigest !== description.stateDigest || snapshot.stateDigest !== description.stateDigest
+      || completion.revision !== description.revision || snapshot.revision !== description.revision) {
+      fail('ASSOCIATION', 'fixture evidence does not match retained completion and curve records');
+    }
+    const page = {
+      schemaVersion: 1,
+      source: { chain: 'solana', indexerId: `synthetic-fixture:${this.#sourceId}`, programId: PROGRAM_ID,
+        slot: description.tip.slot, finality: 'processed', indexedAtMs: evidence.indexedAtMs, cursor: null },
+      tokens: [{ mint, tokenProgram: evidence.metadata.tokenProgram, creator, curveAccount, quoteMint,
+        name, symbol, metadataUri, lifecycle: 'curve_complete', ammV4Pool: null }],
+      accounts: [{ address: curveAccount, ownerProgram: PROGRAM_ID, mint, quoteMint,
+        realTokenReserves: curve.decoded.realTokenReserves, realQuoteReserves: curve.decoded.realQuoteReserves,
+        complete: true, migrated: false }],
+      events: [{ id: `${assertedSignature}:${eventIndex}`, signature: assertedSignature,
+        eventIndex, slot: event.block.slot, mint, kind: 'curve_complete' }],
+    };
+    return detached({ kind: 'synthetic-preview', live: false, verifiedChain: false,
+      sourceId: this.#sourceId, stateDigest: description.stateDigest, revision: description.revision, page });
+  }
 }
 
 export function createFixtureIndexer(options) { return new FixtureIndexer(options); }
+export function buildSyntheticWebFixture(indexer, evidence) {
+  if (!(indexer instanceof FixtureIndexer)) fail('INVALID_ARGUMENT', 'a fixture indexer instance is required');
+  return indexer.syntheticWebFixture(evidence);
+}

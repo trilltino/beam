@@ -67,6 +67,25 @@ query page into `web/src/indexerAdapter.ts` or label it a live token page.
 A separate, verified enrichment and provenance adapter must define those
 fields and pass the web boundary's validation before website integration.
 
+`buildSyntheticWebFixture(indexer, evidence)` is a **sample-only** contract
+for that future bridge. It accepts only an instance created by this module,
+requires `kind: 'synthetic-fixture'` and matching `sourceId`, an explicit
+`indexedAtMs`, metadata assertion (`mint`, `curveAccount`, `quoteMint`,
+`tokenProgram`, `creator`, `name`, `symbol`, `metadataUri`), and an event
+assertion (`recordId`, 64-byte base58 `signature`, `eventIndex`). It uses one
+retained CompleteEvent and a completed curve snapshot; the mint, curve,
+creator and quote association must agree, and stale sources, duplicate
+completions, substituted records, Mayhem/cashback curves and reorged IDs fail.
+The native-SOL quote sentinel maps to the web schema's `null` quote mint.
+The output has a web-shaped `page` inside a wrapper marked
+`kind: 'synthetic-preview'`, `live: false`, `verifiedChain: false`, and a
+`synthetic-fixture:` source ID. Even a well-formed synthetic signature or
+metadata assertion is **not** authenticated chain evidence. Keep this output
+in sample UI; do not strip its wrapper and publish it as a verified or live
+indexer page. Real enrichment requires a separately reviewed authenticated
+source, token-program and metadata proofs, transaction signatures, and
+reorg/finality handling.
+
 ## Replay, finality and authorization boundary
 
 `createFixtureIndexer({ sourceId, limits? })` creates an in-memory instance.

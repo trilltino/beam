@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { PROGRAM_ID, encodeBase58Pubkey } from '../../sdk/beam-native.mjs';
-import { BLOCK_VERSION, QUERY_VERSION, IndexerError, createFixtureIndexer } from './index.mjs';
+import { BLOCK_VERSION, QUERY_VERSION, IndexerError, createFixtureIndexer, buildSyntheticWebFixture } from './index.mjs';
 
 const fixtureBytes = readFileSync(new URL('../../sdk/fixtures/native-sol.json', import.meta.url));
 const fixture = JSON.parse(fixtureBytes);
@@ -36,6 +36,17 @@ const timestampHex = (timestamp) => {
   new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setBigInt64(104, timestamp, true);
   return bytes.toString('hex');
 };
+const sampleEvidence = (recordId) => ({
+  kind: 'synthetic-fixture', sourceId: SOURCE, indexedAtMs: 1_800_000_000_000,
+  metadata: {
+    mint: fixture.completeEvent.expected.mint,
+    curveAccount: fixture.completeEvent.expected.bondingCurve,
+    quoteMint: null, tokenProgram: 'spl_token',
+    creator: fixture.currentBondingCurve.expected.creator,
+    name: 'Beam sample', symbol: 'BEAM', metadataUri: 'https://example.invalid/sample.json',
+  },
+  event: { recordId, signature: '1'.repeat(64), eventIndex: 0 },
+});
 
 test('existing SDK fixture produces exact decoded records with explicit local provenance', () => {
   const indexer = store();
@@ -76,6 +87,63 @@ test('failed replacement suffix preserves the prior fork, source status and page
   assert.equal(events(indexer, { limit: 1, cursor }).items[0].recordIndex, 1);
   assert.equal(indexer.describe().status.state, 'stale');
   assert.equal(indexer.describe().knownBlockIdentities, 2);
+});
+
+test('synthetic web fixture requires explicit matching provenance, event and curve association', () => {
+  const indexer = store();
+  const root = block('100', 100, null, [event(0), curve(1)]);
+  indexer.replay({ blocks: [root] });
+  const recordId = events(indexer).items[0].id;
+  const evidence = sampleEvidence(recordId);
+  const result = buildSyntheticWebFixture(indexer, evidence);
+  assert.equal(result.kind, 'synthetic-preview');
+  assert.equal(result.live, false);
+  assert.equal(result.verifiedChain, false);
+  assert.equal(result.page.source.indexerId, `synthetic-fixture:${SOURCE}`);
+  assert.equal(result.page.source.finality, 'processed');
+  assert.deepEqual(result.page.tokens[0].mint, fixture.completeEvent.expected.mint);
+  assert.equal(result.page.accounts[0].address, fixture.completeEvent.expected.bondingCurve);
+  assert.equal(result.page.events[0].id, `${'1'.repeat(64)}:0`);
+  for (const changed of [
+    { sourceId: 'other' }, { kind: 'verified-chain' },
+    { metadata: { ...evidence.metadata, mint: pk(9) } },
+    { metadata: { ...evidence.metadata, curveAccount: pk(9) } },
+    { metadata: { ...evidence.metadata, creator: pk(9) } },
+    { metadata: { ...evidence.metadata, quoteMint: pk(9) } },
+    { metadata: { ...evidence.metadata, name: 'x'.repeat(33) } },
+    { metadata: { ...evidence.metadata, tokenProgram: 'unknown' } },
+    { event: { ...evidence.event, recordId: 'forged' } },
+    { event: { ...evidence.event, signature: '1'.repeat(63) } },
+  ]) assert.throws(() => buildSyntheticWebFixture(indexer, { ...evidence, ...changed }), (error) => error instanceof IndexerError);
+  assert.throws(() => buildSyntheticWebFixture(indexer, { ...evidence, metadata: { ...evidence.metadata, symbol: undefined } }), code('INVALID_ARGUMENT'));
+  assert.throws(() => buildSyntheticWebFixture({}, evidence), code('INVALID_ARGUMENT'));
+});
+
+test('synthetic web projection fails closed on stale source, duplicate completions and reorg', () => {
+  const indexer = store();
+  const root = block('100', 100, null, [event(0), curve(1)]);
+  indexer.replay({ blocks: [root] });
+  const evidence = sampleEvidence(events(indexer).items[0].id);
+  indexer.markSource({ state: 'stale', detail: 'Fixture paused.' });
+  assert.throws(() => buildSyntheticWebFixture(indexer, evidence), code('UNAVAILABLE'));
+  indexer.replay({ blocks: [root] });
+  const duplicate = block('101', 101, parentOf(root), [event(0), curve(1)]);
+  indexer.replay({ blocks: [duplicate] });
+  assert.throws(() => buildSyntheticWebFixture(indexer, evidence), code('CONFLICT'));
+  indexer.replay({ rollbackTo: null, blocks: [block('100', 102, null, [event(0), curve(1)])] });
+  assert.throws(() => buildSyntheticWebFixture(indexer, evidence), code('ASSOCIATION'));
+});
+
+test('caller-claimed finalized fixture bytes cannot become verified chain evidence', () => {
+  const indexer = store();
+  indexer.replay({ blocks: [block('100', 100, null,
+    [event(0, { dataHex: timestampHex(999n) }), curve(1)], { commitment: 'finalized' })] });
+  const result = buildSyntheticWebFixture(indexer, sampleEvidence(events(indexer).items[0].id));
+  assert.equal(result.kind, 'synthetic-preview');
+  assert.equal(result.live, false);
+  assert.equal(result.verifiedChain, false);
+  assert.equal(result.page.source.finality, 'processed');
+  assert.match(result.page.source.indexerId, /^synthetic-fixture:/);
 });
 
 test('canonical ordering, duplicate positions and exact replay are deterministic and idempotent', () => {
