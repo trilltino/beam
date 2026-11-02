@@ -2,7 +2,9 @@
 
 Beam selected Raydium AMM v4 for graduation. This page tracks the development
 dependency chain. The current Beam migration instruction is a gated, superseded
-CPMM candidate. **No Beam instruction invokes AMM v4, and migration is not enabled.**
+CPMM candidate. A feature-gated, host-only Beam diagnostic now invokes the
+AMM v4 `Initialize2` ABI against a synthetic local processor and always returns
+an error, rolling back the transaction. **Production migration is not enabled.**
 
 The ABI source pin is `raydium-io/raydium-amm@91739d8d9f5cf347e0ce14ebe4d2bb7069fb31b6`.
 It is source evidence, not proof that a deployed Raydium program has matching
@@ -14,7 +16,7 @@ bytes. The archived Pump and CPMM snapshots remain provenance references.
 | Funding | `programs/beam/src/beam_amm_v4_funding.rs` computes checked curve liquidity, creator/protocol liabilities, donor surplus, migration charge, and caller-funded setup budget. | Read all values from trusted on-chain accounts. Bind the existing migration-fee recipient to stored policy. Do not use balance-only refund math without exact account and reserve checks. |
 | Staged settlement | `programs/beam/src/beam_amm_v4_settlement.rs` checks three keyed observations: before setup funding, immediately before CPI, and after CPI. It counts curve-base-vault and curve-SOL funding once, then exact source, pool-vault, named fee-destination, migration-recipient and LP deltas. | Capture the observations from authenticated AccountInfos. Decode Raydium pool state and verify owner, status, mint/vault/LP keys, reserve changes, and LP custody. Bind every setup-rent payment to its created account; the current cap checks only the total. A caller-supplied `receipt_written` boolean is not replay protection. |
 | Post-CPI snapshot | `programs/beam/src/beam_amm_v4_snapshot.rs` inspects actual AccountInfos against the pinned 752-byte packed `AmmInfo`, 2208-byte target-orders account, and classic SPL source/vault/LP/fee destination data. It checks the immediate status, account identities, token authorities, amounts, and WSOL backing. | Bind its market seed, amounts, time and program identity to authenticated Beam policy/Clock inputs; verify the real Raydium binary in an isolated local runtime. The raw layout has no Anchor discriminator and can change with program upgrades. |
-| Runtime evidence | Host unit tests cover the source helpers. A separate local ProgramTest branch exercises a mock AMM v4 processor. | Test the actual Beam migration handler and real pinned Raydium program in an isolated local runtime, including late CPI error and outer rollback. Never use captured original Pump binaries. |
+| Runtime evidence | Host tests cover the source helpers. [PR #59](https://github.com/shawkkkkk/beam/pull/59) tests synthetic post-CPI account snapshots; `tests/runtime-harness/tests/amm_v4_cpi_probe.rs` calls the actual Beam diagnostic entrypoint and a synthetic AMM processor, then rolls back. [PR #38](https://github.com/shawkkkkk/beam/pull/38) separately tests the pinned Raydium source processor with a different Solana runtime version. | Implement and test actual curve-to-source funding, migration-fee and liability settlement, LP custody, a fully valid post-CPI snapshot reaching the terminal gate, and the real Raydium program in an isolated local runtime. Never use captured original Pump binaries. |
 | Client and indexing | AMM v4 ABI fixtures are source-only; the preview labels migration and liquidity unavailable. | Add a namespaced AMM v4 receipt/event, authenticated indexer mapping, SDK builder against the final account ABI, and verified-liquidity state. |
 
 The planned transfer sequence is:
@@ -34,7 +36,10 @@ The planned transfer sequence is:
    donor surplus. Capture final balances and write an authenticated one-time
    receipt within the instruction.
 
-The disabled helpers model this sequence; they do not perform it. Their balance
+The disabled helpers model this sequence; they do not perform it. The diagnostic
+starts with preseeded source ATAs, omits curve funding and fee settlement, and
+cannot complete a migration even when its CPI succeeds. Its SBF compile guard
+has not been tested with a Solana target. The staged settlement helper's balance
 snapshots are values supplied by a caller. An executable adapter must bind
 every value to the intended account, reject aliases before transfers, and
 verify each destination's state. The setup-cost cap alone cannot prove rent
@@ -55,7 +60,14 @@ python3 scripts/check_fork.py
 cargo test --locked --manifest-path programs/beam/Cargo.toml
 cargo test --locked --manifest-path programs/beam/Cargo.toml --features experimental-raydium
 cargo check --locked --manifest-path programs/beam/Cargo.toml --no-default-features
+# When the probe feature/test are present, with synthetic accounts and no live assets:
+cargo test --locked --manifest-path tests/runtime-harness/Cargo.toml --features amm-v4-probe --test amm_v4_cpi_probe
 ```
 
 These checks establish source integrity and deterministic host behavior only.
-They do not exercise Beam's migration entrypoint or Raydium's deployed binary.
+The probe test exercises a Beam diagnostic entrypoint and a synthetic AMM CPI;
+it does not exercise Beam's production migration handler, a real SPL processor,
+the pinned Raydium source processor in the same transaction, or a deployed
+Raydium binary. The synthetic test covers an inner CPI error and a post-CPI
+snapshot rejection with rollback; it does not reach the unconditional terminal
+error after a fully valid snapshot.
