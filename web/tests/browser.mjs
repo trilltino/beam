@@ -130,6 +130,17 @@ try {
   await until("!!document.querySelector('.site-shell')");
   const initialCopy = await evaluate("document.body.innerText");
   assert.match(initialCopy, /sample market data/i);
+  assert.match(initialCopy, /\[start a new coin\]/i);
+  assert.match(
+    initialCopy,
+    /Local draft preview only\. No token is created\./i,
+  );
+  assert.equal(
+    await evaluate(
+      "getComputedStyle(document.querySelector('#hill-preview-title')).fontStyle",
+    ),
+    "italic",
+  );
   assert.match(initialCopy, /Raydium AMM v4/i);
   assert.match(
     initialCopy,

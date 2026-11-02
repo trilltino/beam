@@ -6,6 +6,15 @@ accent. This describes the development website preview, not a live launchpad
 or an economic promise. Product and fee decisions remain in the [README](../README.md)
 and [economics brief](ECONOMICS.md).
 
+Favor the simple, dark feel of an early launchpad: a clear action, readable
+sample feed, and a few playful retro details. The hero action uses the visible
+bracketed text **[start a new coin]** but opens only a local draft preview;
+its adjacent copy must say no token is created. King of the Hill may use a
+bold, italic, chunky blue/purple extruded heading. Keep its featured slot
+explicitly labeled **No live leader** until evidenced rules and authenticated
+data exist. These are original Beam treatments, not copied artwork or claims
+about another site's operation.
+
 ## Mark and color
 
 The mark is a capital **A without a crossbar**: two mirrored, inward-curving
@@ -34,6 +43,9 @@ black, or add a pale tile behind the inverse mark.
   numbers stay readable. Align amounts with tabular numerals.
 - Use faint grids and orbital arcs only behind decorative hero/CTA content.
   Never put scanlines or strong glow over prices, charts, controls or warnings.
+- Keep extruded text confined to decorative headings. The grid and orbital
+  effects may be reduced or removed to keep the launch action and preview
+  labels prominent; never extrude financial amounts or form labels.
 - Keep keyboard focus visible, text contrast high, controls usable on mobile,
   and motion optional under `prefers-reduced-motion`. Avoid flashing effects.
 - Preserve the explicit sample-data and unavailable-action labels. Visual

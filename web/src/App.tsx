@@ -491,10 +491,12 @@ function App() {
             </p>
             <div className="hero-actions">
               <button
-                className="btn btn-primary btn-large"
+                className="btn btn-primary btn-large hero-start"
+                aria-label="Start a new coin draft preview"
+                aria-describedby="hero-start-note"
                 onClick={() => setModal("create")}
               >
-                Create a token <ArrowUpRight size={18} />
+                [start a new coin] <ArrowUpRight size={18} />
               </button>
               <button
                 className="btn btn-secondary btn-large"
@@ -503,6 +505,9 @@ function App() {
                 Explore launches <ArrowRight size={18} />
               </button>
             </div>
+            <p id="hero-start-note" className="hero-start-note">
+              Local draft preview only. No token is created.
+            </p>
             <div className="hero-proof">
               <span className="proof-icon">
                 <ShieldCheck size={15} />
