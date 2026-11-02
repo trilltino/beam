@@ -16,7 +16,7 @@ bytes. The archived Pump and CPMM snapshots remain provenance references.
 | Funding | `programs/beam/src/beam_amm_v4_funding.rs` computes checked curve liquidity, creator/protocol liabilities, donor surplus, migration charge, and caller-funded setup budget. | Read all values from trusted on-chain accounts. Bind the existing migration-fee recipient to stored policy. Do not use balance-only refund math without exact account and reserve checks. |
 | Staged settlement | `programs/beam/src/beam_amm_v4_settlement.rs` checks three keyed observations: before setup funding, immediately before CPI, and after CPI. It counts curve-base-vault and curve-SOL funding once, then exact source, pool-vault, named fee-destination, migration-recipient and LP deltas. | Capture the observations from authenticated AccountInfos. Decode Raydium pool state and verify owner, status, mint/vault/LP keys, reserve changes, and LP custody. Bind every setup-rent payment to its created account; the current cap checks only the total. A caller-supplied `receipt_written` boolean is not replay protection. |
 | Post-CPI snapshot | `programs/beam/src/beam_amm_v4_snapshot.rs` inspects actual AccountInfos against the pinned 752-byte packed `AmmInfo`, 2208-byte target-orders account, and classic SPL source/vault/LP/fee destination data. It checks the immediate status, account identities, token authorities, amounts, and WSOL backing. | Bind its market seed, amounts, time and program identity to authenticated Beam policy/Clock inputs; verify the real Raydium binary in an isolated local runtime. The raw layout has no Anchor discriminator and can change with program upgrades. |
-| Runtime evidence | Host tests cover the source helpers. [PR #59](https://github.com/shawkkkkk/beam/pull/59) tests synthetic post-CPI account snapshots; `tests/runtime-harness/tests/amm_v4_cpi_probe.rs` calls the actual Beam diagnostic entrypoint and a synthetic AMM processor, then rolls back. [PR #38](https://github.com/shawkkkkk/beam/pull/38) separately tests the pinned Raydium source processor with a different Solana runtime version. | Implement and test actual curve-to-source funding, migration-fee and liability settlement, LP custody, a fully valid post-CPI snapshot reaching the terminal gate, and the real Raydium program in an isolated local runtime. Never use captured original Pump binaries. |
+| Runtime evidence | Host tests cover the source helpers. [PR #59](https://github.com/shawkkkkk/beam/pull/59) tests synthetic post-CPI account snapshots; `tests/runtime-harness/tests/amm_v4_cpi_probe.rs` calls the actual Beam diagnostic entrypoint and synthetic AMM/SPL/ATA processors, including a valid packed snapshot that reaches the terminal rollback gate. [PR #38](https://github.com/shawkkkkk/beam/pull/38) separately tests the pinned Raydium source processor with a different Solana runtime version. | Implement and test actual curve-to-source funding, migration-fee and liability settlement, LP custody, and the real Raydium program in an isolated local runtime. Never use captured original Pump binaries. |
 | Client and indexing | AMM v4 ABI fixtures are source-only; the preview labels migration and liquidity unavailable. | Add a namespaced AMM v4 receipt/event, authenticated indexer mapping, SDK builder against the final account ABI, and verified-liquidity state. |
 
 The planned transfer sequence is:
@@ -65,9 +65,10 @@ cargo test --locked --manifest-path tests/runtime-harness/Cargo.toml --features 
 ```
 
 These checks establish source integrity and deterministic host behavior only.
-The probe test exercises a Beam diagnostic entrypoint and a synthetic AMM CPI;
-it does not exercise Beam's production migration handler, a real SPL processor,
-the pinned Raydium source processor in the same transaction, or a deployed
-Raydium binary. The synthetic test covers an inner CPI error and a post-CPI
-snapshot rejection with rollback; it does not reach the unconditional terminal
-error after a fully valid snapshot.
+The probe test exercises a Beam diagnostic entrypoint and synthetic AMM, SPL
+Token and associated-token processors; it does not exercise Beam's production
+migration handler, the real SPL processors, the pinned Raydium source processor
+in the same transaction, or a deployed Raydium binary. Synthetic cases cover
+an inner CPI error, a post-CPI snapshot rejection, and a valid packed snapshot
+that reaches the unconditional terminal error. Each case rolls back its listed
+fixture accounts; transaction-payer fees are outside that assertion.

@@ -6,15 +6,23 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anchor_lang::solana_program::{
-    account_info::AccountInfo, entrypoint::ProgramResult, program::invoke_signed,
-    program_error::ProgramError, pubkey, pubkey::Pubkey, rent::Rent, system_instruction,
-    system_program,
+    account_info::AccountInfo,
+    entrypoint::ProgramResult,
+    instruction::{AccountMeta, Instruction},
+    program::{invoke, invoke_signed},
+    program_error::ProgramError,
+    pubkey,
+    pubkey::Pubkey,
+    rent::Rent,
+    system_instruction, system_program,
+    sysvar::{clock::Clock, Sysvar},
 };
 use anchor_lang::{AccountSerialize, Discriminator, InstructionData};
 use beam_program::{
     beam_amm_v4::{
         derive_pool_addresses, initialize2_instruction, user_lp_ata, Initialize2Accounts,
-        Initialize2Args, MintKey, DEVNET_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        Initialize2Args, MintKey, ASSOCIATED_TOKEN_PROGRAM_ID, DEVNET_PROGRAM_ID,
+        SPL_TOKEN_PROGRAM_ID,
     },
     trade_types::BondingCurve,
     Global,
@@ -34,6 +42,7 @@ const BASE: u64 = 2_000_000;
 const QUOTE: u64 = 2_000_000;
 const NATIVE_RENT: u64 = 3_000_000;
 const MOCK_REJECT: u32 = 61_000;
+const DEVNET_AMM_OWNER: Pubkey = pubkey!("DRayqG9RXYi8WHgWEmRQGrUWRWbhjYWYkCRJDd6JBBak");
 static CPI_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 // The test bank and Anchor helpers can instantiate different Pubkey crates.
@@ -62,6 +71,13 @@ fn mint_bytes(decimals: u8) -> Vec<u8> {
     let mut data = vec![0; 82];
     data[44] = decimals;
     data[45] = 1;
+    data
+}
+fn lp_mint_bytes(authority: Pubkey) -> Vec<u8> {
+    let mut data = mint_bytes(6);
+    data[..4].copy_from_slice(&1u32.to_le_bytes());
+    put_key(&mut data, 4, authority);
+    put_u64(&mut data, 36, 1_000_000);
     data
 }
 fn token_bytes(mint: Pubkey, owner: Pubkey, amount: u64, native: bool) -> Vec<u8> {
@@ -116,6 +132,148 @@ fn beam_processor<'a>(id: &SdkPubkey, infos: &[AccountInfo<'a>], data: &[u8]) ->
     beam_program::entry(id, infos, data)
 }
 
+// These processors exist only in this local bank. In particular, this token
+// processor is not SPL Token: it writes a precomputed valid post-state to
+// exercise Beam's snapshot and terminal rollback, without claiming genuine
+// Raydium settlement or token-transfer authorization.
+fn mock_token<'a>(id: &SdkPubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramResult {
+    if anchor(*id) != SPL_TOKEN_PROGRAM_ID
+        || data != [99]
+        || infos.len() != 8
+        || !infos[..6].iter().all(|info| info.owner == &anchor(*id))
+    {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let pool_authority = *infos[6].key;
+    let wallet = *infos[7].key;
+    infos[0]
+        .try_borrow_mut_data()?
+        .copy_from_slice(&lp_mint_bytes(pool_authority));
+    infos[1]
+        .try_borrow_mut_data()?
+        .copy_from_slice(&token_bytes(MINT, pool_authority, BASE, false));
+    let native_reserve = infos[2].lamports();
+    let mut quote_vault = token_bytes(WSOL, pool_authority, QUOTE, true);
+    put_u64(&mut quote_vault, 113, native_reserve);
+    infos[2]
+        .try_borrow_mut_data()?
+        .copy_from_slice(&quote_vault);
+    infos[3]
+        .try_borrow_mut_data()?
+        .copy_from_slice(&token_bytes(MINT, wallet, 0, false));
+    infos[4]
+        .try_borrow_mut_data()?
+        .copy_from_slice(&token_bytes(WSOL, wallet, 0, true));
+    infos[5]
+        .try_borrow_mut_data()?
+        .copy_from_slice(&token_bytes(*infos[0].key, wallet, 1_000_000, false));
+    **infos[4].try_borrow_mut_lamports()? -= QUOTE;
+    **infos[2].try_borrow_mut_lamports()? += QUOTE;
+    Ok(())
+}
+
+fn mock_ata<'a>(id: &SdkPubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramResult {
+    if anchor(*id) != ASSOCIATED_TOKEN_PROGRAM_ID
+        || !data.is_empty()
+        || infos.len() != 5
+        || !infos[0].is_signer
+        || infos[3].key != &SPL_TOKEN_PROGRAM_ID
+    {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let seeds = &[
+        infos[0].key.as_ref(),
+        infos[3].key.as_ref(),
+        infos[4].key.as_ref(),
+    ];
+    let (ata, bump) = Pubkey::find_program_address(seeds, &anchor(*id));
+    if infos[1].key != &ata {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let ix = system_instruction::create_account(
+        infos[0].key,
+        infos[1].key,
+        Rent::default().minimum_balance(165),
+        165,
+        &SPL_TOKEN_PROGRAM_ID,
+    );
+    invoke_signed(
+        &ix,
+        &[infos[0].clone(), infos[1].clone(), infos[2].clone()],
+        &[&[seeds[0], seeds[1], seeds[2], &[bump]]],
+    )
+}
+
+fn create_amm_account<'a>(
+    id: &SdkPubkey,
+    infos: &[AccountInfo<'a>],
+    index: usize,
+    suffix: &[u8],
+    space: usize,
+    owner: Pubkey,
+) -> ProgramResult {
+    let market = *infos[14].key;
+    let (expected, bump) =
+        Pubkey::find_program_address(&[id.as_ref(), market.as_ref(), suffix], &anchor(*id));
+    if infos[index].key != &expected {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let ix = system_instruction::create_account(
+        infos[15].key,
+        infos[index].key,
+        Rent::default().minimum_balance(space),
+        space as u64,
+        &owner,
+    );
+    invoke_signed(
+        &ix,
+        &[infos[15].clone(), infos[index].clone(), infos[2].clone()],
+        &[&[id.as_ref(), market.as_ref(), suffix, &[bump]]],
+    )
+}
+
+fn populate_pool(
+    data: &mut [u8],
+    id: &SdkPubkey,
+    infos: &[AccountInfo<'_>],
+    open_time: u64,
+    status: u64,
+) {
+    let p = derive_pool_addresses(&anchor(*id), infos[14].key).unwrap();
+    put_u64(data, 0, status);
+    put_u64(data, 8, u64::from(p.nonce));
+    put_u64(data, 32, 6);
+    put_u64(data, 40, 9);
+    put_u64(data, 48, 1);
+    put_u64(data, 120, 1_000_000_000);
+    for (at, value) in [
+        (128, 5),
+        (136, 10_000),
+        (144, 25),
+        (152, 10_000),
+        (160, 12),
+        (168, 100),
+        (176, 25),
+        (184, 10_000),
+    ] {
+        put_u64(data, at, value);
+    }
+    put_u64(data, 224, open_time);
+    for (at, key) in [
+        (336, p.coin_vault),
+        (368, p.pc_vault),
+        (400, MINT),
+        (432, WSOL),
+        (464, p.lp_mint),
+        (528, *infos[14].key),
+        (592, p.target_orders),
+        (688, DEVNET_AMM_OWNER),
+    ] {
+        put_key(data, at, key);
+    }
+    put_u64(data, 720, 2_000_000);
+}
+
 fn mock_amm<'a>(id: &SdkPubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> ProgramResult {
     if anchor(*id) != DEVNET_PROGRAM_ID
         || infos.len() != 19
@@ -130,34 +288,92 @@ fn mock_amm<'a>(id: &SdkPubkey, infos: &[AccountInfo<'a>], data: &[u8]) -> Progr
         return Err(ProgramError::Custom(MOCK_REJECT));
     }
 
-    // The test-only AMM creates its own pool PDA using the Beam PDA signer as
-    // payer. This reversible write proves the outer Beam transaction rolls
-    // back a successful CPI when the post-CPI snapshot rejects incomplete data.
-    let market = *infos[14].key;
-    let (pool, bump) = Pubkey::find_program_address(
-        &[id.as_ref(), market.as_ref(), b"amm_associated_seed"],
-        &anchor(*id),
-    );
-    if infos[4].key != &pool {
-        return Err(ProgramError::InvalidAccountData);
+    // The synthetic AMM spends from Beam's signed PDA and creates its pool.
+    // Branch 1 leaves incomplete state so Beam's post-CPI snapshot rejects.
+    create_amm_account(id, infos, 4, b"amm_associated_seed", 752, anchor(*id))?;
+    if data[2] == 1 {
+        return Ok(());
     }
-    let ix = system_instruction::create_account(
-        infos[15].key,
-        infos[4].key,
-        Rent::default().minimum_balance(752),
-        752,
-        &anchor(*id),
-    );
-    invoke_signed(
-        &ix,
-        &[infos[15].clone(), infos[4].clone(), infos[2].clone()],
-        &[&[
-            id.as_ref(),
-            market.as_ref(),
-            b"amm_associated_seed",
-            &[bump],
-        ]],
+
+    // Branch 2 fabricates a complete, internally consistent post-state using
+    // test-only ATA/token processors. It does not execute SPL or Raydium code.
+    for (index, suffix, space, owner) in [
+        (
+            6,
+            b"lp_mint_associated_seed".as_slice(),
+            82,
+            SPL_TOKEN_PROGRAM_ID,
+        ),
+        (
+            9,
+            b"coin_vault_associated_seed".as_slice(),
+            165,
+            SPL_TOKEN_PROGRAM_ID,
+        ),
+        (
+            10,
+            b"pc_vault_associated_seed".as_slice(),
+            165,
+            SPL_TOKEN_PROGRAM_ID,
+        ),
+        (11, b"target_associated_seed".as_slice(), 2208, anchor(*id)),
+    ] {
+        create_amm_account(id, infos, index, suffix, space, owner)?;
+    }
+    let ata_ix = Instruction {
+        program_id: ASSOCIATED_TOKEN_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*infos[15].key, true),
+            AccountMeta::new(*infos[18].key, false),
+            AccountMeta::new_readonly(*infos[2].key, false),
+            AccountMeta::new_readonly(*infos[0].key, false),
+            AccountMeta::new_readonly(*infos[6].key, false),
+        ],
+        data: vec![],
+    };
+    invoke(
+        &ata_ix,
+        &[
+            infos[15].clone(),
+            infos[18].clone(),
+            infos[2].clone(),
+            infos[0].clone(),
+            infos[6].clone(),
+            infos[1].clone(),
+        ],
     )?;
+    let token_ix = Instruction {
+        program_id: SPL_TOKEN_PROGRAM_ID,
+        accounts: [6, 9, 10, 16, 17, 18, 5, 15]
+            .into_iter()
+            .map(|index| AccountMeta {
+                pubkey: *infos[index].key,
+                is_signer: false,
+                is_writable: index <= 18 && matches!(index, 6 | 9 | 10 | 16 | 17 | 18),
+            })
+            .collect(),
+        data: vec![99],
+    };
+    let token_infos: Vec<_> = [6, 9, 10, 16, 17, 18, 5, 15]
+        .into_iter()
+        .map(|index| infos[index].clone())
+        .chain(std::iter::once(infos[0].clone()))
+        .collect();
+    invoke(&token_ix, &token_infos)?;
+    let open_time = u64::from_le_bytes(data[2..10].try_into().unwrap());
+    let status = if open_time > Clock::get()?.unix_timestamp as u64 {
+        7
+    } else {
+        6
+    };
+    populate_pool(
+        &mut infos[4].try_borrow_mut_data()?,
+        id,
+        infos,
+        open_time,
+        status,
+    );
+    put_key(&mut infos[11].try_borrow_mut_data()?, 0, *infos[4].key);
     Ok(())
 }
 
@@ -215,6 +431,16 @@ async fn fixture(precreated_pool: bool, frozen_source: bool) -> Fixture {
         sdk(DEVNET_PROGRAM_ID),
         processor!(mock_amm),
     );
+    bank.add_program(
+        "synthetic_spl_token",
+        sdk(SPL_TOKEN_PROGRAM_ID),
+        processor!(mock_token),
+    );
+    bank.add_program(
+        "synthetic_ata",
+        sdk(ASSOCIATED_TOKEN_PROGRAM_ID),
+        processor!(mock_ata),
+    );
     bank.add_account(
         sdk(global),
         account(
@@ -241,17 +467,11 @@ async fn fixture(precreated_pool: bool, frozen_source: bool) -> Fixture {
         account(SPL_TOKEN_PROGRAM_ID, 100_000_000, mint_bytes(9), false),
     );
     for (index, meta) in inner.accounts.iter().enumerate() {
-        if matches!(index, 2 | 3 | 7 | 8 | 15) {
+        if matches!(index, 0 | 1 | 2 | 3 | 7 | 8 | 15) {
             continue;
         }
         let key = meta.pubkey;
         let (owner, lamports, data, executable) = match index {
-            0 | 1 => (
-                anchor_lang::solana_program::bpf_loader_upgradeable::ID,
-                100_000_000,
-                vec![],
-                true,
-            ),
             4 | 6 | 9 | 10 | 11 | 18 => (
                 system_program::ID,
                 u64::from(precreated_pool && index == 4),
@@ -344,6 +564,17 @@ async fn attempt(f: &mut Fixture, open_time: u64) -> String {
     )
 }
 
+async fn fixture_state(f: &mut Fixture) -> Vec<Option<Account>> {
+    let keys = [4, 6, 9, 10, 11, 13, 15, 16, 17, 18]
+        .into_iter()
+        .map(|index| f.instruction.accounts[6 + index].pubkey);
+    let mut state = Vec::new();
+    for key in keys {
+        state.push(f.bank.banks_client.get_account(key).await.unwrap());
+    }
+    state
+}
+
 #[tokio::test]
 async fn beam_probe_reaches_cpi_and_rejects_before_or_after_without_committing() {
     CPI_CALLS.store(0, Ordering::SeqCst);
@@ -388,6 +619,15 @@ async fn beam_probe_reaches_cpi_and_rejects_before_or_after_without_committing()
             .unwrap(),
         before_signer
     );
+
+    let before_full = fixture_state(&mut f).await;
+    let full = attempt(&mut f, 2).await;
+    assert!(
+        full.contains("Custom(7002)"),
+        "valid synthetic snapshot must reach unconditional gate: {full}"
+    );
+    assert_eq!(CPI_CALLS.load(Ordering::SeqCst), 3);
+    assert_eq!(fixture_state(&mut f).await, before_full);
 
     for (precreated, frozen) in [(true, false), (false, true)] {
         let mut invalid = fixture(precreated, frozen).await;
