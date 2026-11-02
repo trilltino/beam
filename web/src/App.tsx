@@ -24,6 +24,7 @@ import {
   Zap,
 } from "lucide-react";
 import { sampleTokens, type Token } from "./data";
+import { dataLabel, sampleState } from "./indexerAdapter";
 import {
   getBrowserStorage,
   nextDraftId,
@@ -40,6 +41,10 @@ import {
 
 type Feed = "trending" | "new" | "graduating" | "watchlist";
 type Modal = "create" | "wallet" | "how" | null;
+
+// The preview has no authenticated indexer feed. Keep its cards in sample state.
+const marketData = sampleState(sampleTokens);
+const marketDataLabel = dataLabel(marketData, Date.now(), 30_000);
 
 function draftToken(draft: DraftRecord): Token {
   const minutes = Math.max(
@@ -336,7 +341,7 @@ function App() {
 
   const tokens = useMemo(() => {
     const draftTokens = drafts.map(draftToken);
-    let result = orderNewFeed(draftTokens, sampleTokens);
+    let result = orderNewFeed(draftTokens, [...marketData.records]);
     if (feed === "watchlist")
       result = result.filter((token) => saved.includes(token.id));
     if (feed === "graduating")
@@ -584,7 +589,7 @@ function App() {
               <p>Explore communities taking shape on Beam.</p>
             </div>
             <div className="market-badge">
-              <Activity size={16} /> Sample market view
+              <Activity size={16} /> {marketDataLabel}
             </div>
           </div>
           <div className="market-toolbar">

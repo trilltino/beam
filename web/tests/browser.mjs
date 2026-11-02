@@ -130,6 +130,10 @@ try {
   await until("!!document.querySelector('.site-shell')");
   const initialCopy = await evaluate("document.body.innerText");
   assert.match(initialCopy, /sample market data/i);
+  assert.equal(
+    await evaluate("document.querySelector('.market-badge')?.innerText.trim()"),
+    "Sample data — no chain source",
+  );
   assert.match(initialCopy, /Raydium AMM v4/i);
   assert.match(
     initialCopy,
