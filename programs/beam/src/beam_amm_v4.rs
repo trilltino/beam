@@ -1,5 +1,6 @@
-//! Source-only Raydium AMM v4 `Initialize2` ABI. This module is not wired to a
-//! Beam instruction and performs no CPI, liquidity disposal, or fee collection.
+//! Source-only Raydium AMM v4 `Initialize2` ABI. A host-only, always-rollback
+//! Beam diagnostic can call this helper; no migration instruction uses it to
+//! complete a pool, dispose of liquidity, or collect fees.
 //!
 //! Program reference: raydium-io/raydium-amm at
 //! 91739d8d9f5cf347e0ce14ebe4d2bb7069fb31b6, `instruction.rs` and

@@ -11,3 +11,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --manifest-path tests/runtime-harness/Cargo.toml
       - run: cargo test --locked --manifest-path tests/runtime-harness/Cargo.toml --features experimental-raydium
+      # Host-only Beam-entry CPI shape/rollback diagnostic against a synthetic
+      # AMM processor. This does not execute the pinned Raydium source processor
+      # or any deployed binary, and the probe feature cannot be built for SBF.
+      - run: cargo test --locked --manifest-path tests/runtime-harness/Cargo.toml --features amm-v4-probe --test amm_v4_cpi_probe

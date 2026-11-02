@@ -9,6 +9,7 @@ crate-type = ["cdylib", "lib"]
 default = ["raydium-devnet"]
 raydium-devnet = []
 experimental-raydium = []
+amm-v4-probe = [] # Host-only, always-rollback CPI diagnostic; never deploy.
 no-entrypoint = []
 cpi = ["no-entrypoint"]
 no-idl = []

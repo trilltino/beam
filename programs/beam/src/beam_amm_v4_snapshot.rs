@@ -5,7 +5,8 @@
 //! and `processor.rs::process_initialize2`. This raw packed layout has no
 //! Anchor discriminator. A verified account owner and length are necessary,
 //! but this does not prove a deployed program binary matches that source.
-//! No Beam instruction calls this helper or enables migration.
+//! Only a host-only, always-rollback Beam diagnostic calls this helper; it
+//! does not enable migration or establish deployed-program compatibility.
 
 use anchor_lang::solana_program::{
     account_info::AccountInfo, program_option::COption, program_pack::Pack, pubkey,
