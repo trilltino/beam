@@ -58,13 +58,12 @@ only demonstrates a required liveness branch.
 The implementation uses arbitrary-precision `BigInt`; accepting u64 inputs
 does not prove u128 or on-chain arithmetic bounds for a real batch program.
 
-The equal-budget comparison shows that a 100-token first buy costs 112
-fee-free quote units while the second costs 140 on one curve fixture. A
-**hypothetical** batch with a separately chosen 224-unit quote target gives
-two 112-unit budgets 100 tokens each. That target, fill price, deposit and
-refund rule are not Beam policy; the comparison does not prove that the
-batch is better for every honest user or resistant to wealthy coordinated
-buyers. Batch entry also adds wait/cancellation costs and possible censoring.
+The original rational illustration uses two 112-unit budgets and a chosen
+224-unit target to give each participant 100 tokens. On the continuous curve,
+the first 112-unit budget buys 100 while the next buys 82. Thus that rational
+illustration sells **200 versus 182** tokens and is not an aggregate-economics
+match. The exact-integer comparison below holds aggregate tokens and quote
+spending equal. Neither chooses Beam's price, deposits or refunds.
 
 `integer-batch.mjs` is a separate **exact-integer offline reference**. Test
 inputs explicitly set token lot size, quote units per lot, lot capacity,
@@ -79,11 +78,30 @@ and 3,584 bounded split-budget scenarios. Splitting cannot increase a
 participant's combined allocated lots at fixed total budget and competing
 orders, although it can reduce its allocation. Wealthy actors can still
 dominate a common-price batch; this is not an identity or fairness guarantee.
-The 112-unit budget comparison uses a separately chosen 112-unit lot price:
-the first continuous 100-token buy costs 112, a later 100-token buy costs 140,
-and the later buyer could get only 82 tokens for 112 in that fixture. The
-batch gives each 112-unit budget one 100-token lot. It does **not** establish
-which launch price, capacity, lot granularity or waiting cost is acceptable.
+The split non-gain property also has a bounded arithmetic argument: for price
+`p`, splitting budget `B` gives total demand `sum(floor(b_i/p)) <= floor(B/p)`.
+With other demand `H` and lot cap `C`, the whole-order allocation
+`A(d) = d` when `d+H <= C`, otherwise `floor(C*d/(d+H))`, is monotone in `d`.
+The sum of floored split allocations is at most `A(sum(d_i))`, hence at most
+`A(floor(B/p))`. This assumes unchanged price, capacity, other demand and
+one batch; it proves no extra **lots**, not equal fills or actor identity.
+
+For equal 112-unit budgets, the continuous fixture sells 100 tokens to the
+first buyer and 82 to the second, taking 224 quote units. A test-only batch
+with two 91-token lots at 112 quote units each also sells 182 tokens for 224
+quote units, allocating 91 to each. The lot size and price were fitted to
+this fixture; its final reserve state, later trades, latency and price
+discovery are not modeled as equivalent. An adversarial rounding case has a
+90-unit order receive 4 of 5 lots and a 10-unit honest order receive zero
+with its full 10-unit budget refunded. The fifth lot remains unassigned.
+This is a real participation cost of the candidate's no-dust-award rule,
+even though no user loses quote in this model. Batch entry also adds waiting,
+cancellation and censorship costs.
+
+The reference caps input at 128 orders and its journal at 129 events. Replay
+work grows with journal length and the demonstration store replays on each
+commit, so a full sequence costs more than linear work. These are local
+resource bounds, not on-chain compute proofs or production caps.
 
 The reference journal serializes a plan digest and hash-chained events. A
 local in-memory compare-and-swap check rejects stale heads and duplicate

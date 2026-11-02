@@ -61,6 +61,22 @@ test('order permutations and equal-demand ties do not assign a bonus or dust', (
   assert.deepEqual(first.rows.map((row) => row.id), ['a', 'z']);
   assert.deepEqual(first.rows.map((row) => row.allocatedLots), ['2', '2']);
   assert.equal(first.unallocatedLots, '1');
+  const four = [budget('z', 43n), budget('c', 50n),
+    budget('a', 50n), budget('m', 77n)];
+  const baseline = planIntegerBatch(fixture(four, { tokenCapLots: 7n }));
+  let permutations = 0;
+  const visit = (prefix, remaining) => {
+    if (remaining.length === 0) {
+      assert.deepEqual(planIntegerBatch(fixture(prefix, { tokenCapLots: 7n })), baseline);
+      permutations++;
+      return;
+    }
+    for (let i = 0; i < remaining.length; i++) {
+      visit([...prefix, remaining[i]], remaining.filter((_, index) => index !== i));
+    }
+  };
+  visit([], four);
+  assert.equal(permutations, 24);
 });
 
 test('splitting a fixed budget never increases acquired lots over a bounded adversarial grid', () => {
@@ -87,9 +103,17 @@ test('splitting a fixed budget never increases acquired lots over a bounded adve
     }
   }
   assert.equal(cases, 3584);
+  const whole = planIntegerBatch(fixture([budget('actor', 29n), budget('honest', 37n)],
+    { tokenCapLots: 3n, lotPriceQuoteUnits: 10n }));
+  const splitThree = planIntegerBatch(fixture([budget('a1', 9n), budget('a2', 10n),
+    budget('a3', 10n), budget('honest', 37n)],
+  { tokenCapLots: 3n, lotPriceQuoteUnits: 10n }));
+  assert.ok(splitThree.rows.filter((row) => row.id.startsWith('a'))
+    .reduce((sum, row) => sum + BigInt(row.allocatedLots), 0n)
+    <= BigInt(whole.rows.find((row) => row.id === 'actor').allocatedLots));
 });
 
-test('equal-budget comparison exposes changed ordering, not a production price choice', () => {
+test('same aggregate tokens and quote budget redistribute modeled early advantage', () => {
   const start = curveState({ virtualToken: 1000n, virtualQuote: 1000n,
     realToken: 500n, realQuote: 0n });
   const first = buyExactTokens(start, 100n);
@@ -97,11 +121,26 @@ test('equal-budget comparison exposes changed ordering, not a production price c
   assert.equal(buyExactTokens(first.state, 100n).quoteIn, 140n);
   assert.equal(buyExactTokens(first.state, 82n).quoteIn, 112n);
   assert.ok(buyExactTokens(first.state, 83n).quoteIn > 112n);
+  const aggregateContinuousTokens = 100n + 82n;
+  const aggregateContinuousQuote = first.quoteIn
+    + buyExactTokens(first.state, 82n).quoteIn;
   const batch = planIntegerBatch(fixture([budget('early', 112n), budget('later', 112n)],
-    { tokenCapLots: 2n, lotPriceQuoteUnits: 112n }));
-  assert.deepEqual(batch.rows.map((row) => row.tokenUnits), ['100', '100']);
+    { tokenCapLots: 2n, lotSizeTokenUnits: 91n, lotPriceQuoteUnits: 112n }));
+  assert.deepEqual(batch.rows.map((row) => row.tokenUnits), ['91', '91']);
   assert.deepEqual(batch.rows.map((row) => row.quoteSpentUnits), ['112', '112']);
+  assert.equal(sums(batch, 'tokenUnits'), aggregateContinuousTokens);
+  assert.equal(sums(batch, 'quoteSpentUnits'), aggregateContinuousQuote);
   conserved(batch);
+});
+
+test('integer dust can exclude a small honest order while refunding it fully', () => {
+  const plan = planIntegerBatch(fixture([budget('large', 90n), budget('small', 10n)],
+    { tokenCapLots: 5n, lotPriceQuoteUnits: 10n }));
+  assert.deepEqual(plan.rows.map((row) => [row.id, row.allocatedLots,
+    row.quoteSpentUnits, row.quoteRefundUnits]),
+  [['large', '4', '40', '50'], ['small', '0', '0', '10']]);
+  assert.equal(plan.prorataRoundingLots, '1');
+  conserved(plan);
 });
 
 test('journal replays from JSON, rejects stale CAS and duplicate claims', () => {

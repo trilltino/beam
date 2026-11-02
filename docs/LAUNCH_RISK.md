@@ -88,6 +88,26 @@ cover reorgs and stale data.
 
 ## Decision gates before any mechanism
 
+### Candidate paths to compare
+
+| Path | Potential benefit to test | Cost or missing decision |
+| --- | --- | --- |
+| Existing continuous curve | Immediate entry and retained quote behavior provide the baseline. | Ordered early buys get different prices; bundling and linked wallets remain possible. |
+| Disabled opening-fee experiment | A time-limited expensive opening may discourage some immediate buys. | It also charges ordinary buyers and can move the race to the fee boundary; surcharge allocation, denominator, timing and exemptions are undecided. |
+| Bounded common-price batch | [Offline integer fixtures](../tests/launch-risk/README.md) remove order advantage *inside the chosen batch* and show no lot gain from splitting one fixed budget. | A wealthy buyer still buys more; small orders can receive zero due to floor rounding. Price, lot size, delay, custody, durable claim/refund storage and direct-route enforcement are undecided. |
+| Commit/reveal or delayed disclosure | Could reduce some visible advance-order advantage if all entry routes obey the same rule. | Public deposits may leak size; nonreveal, censorship, deposits, refunds and deadline recovery need a reviewed design. |
+
+The next useful local experiment is to compare these candidates with equal
+buyer budgets, aggregate token/quote totals, fair-user fill and wait costs,
+including creator-first and delayed side-wallet cases. The integer fixture
+holds one comparison's **aggregate** tokens and quote spent equal: a
+continuous first buyer obtains 100 tokens for 112 quote units and the next
+obtains 82 for 112; a separately priced two-lot batch allocates 91 to each
+for the same 182 tokens and 224 quote units. That price and lot size were
+chosen only to make the comparison, not approved as Beam policy. The batch
+cannot establish the same later curve reserve state, nor prevent a larger
+budget from dominating. No path is selected for activation.
+
 Research must first define the attack and a measurable fair-user outcome.
 Any proposed buy-side fee or restriction then requires explicit decisions on
 the fee denominator (gross debit versus net notional), time/slot start and
