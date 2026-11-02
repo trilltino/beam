@@ -24,6 +24,11 @@ test('same nominal spot proxy can have different reserve depth and price impact'
   assert.equal(b.quoteIn, 102n);
   assert.ok(a.state.virtualQuote * b.state.virtualToken >
     b.state.virtualQuote * a.state.virtualToken);
+  // At the same 112-unit budget and spot proxy, the deeper fixture permits
+  // 110 tokens while the shallower fixture permits only 100.
+  assert.equal(buyExactTokens(deep, 110n).quoteIn, 112n);
+  assert.ok(buyExactTokens(deep, 111n).quoteIn > 112n);
+  assert.ok(buyExactTokens(shallow, 101n).quoteIn > 112n);
 });
 
 test('a higher nominal quote reserve charges honest and coordinated buys alike', () => {

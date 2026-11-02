@@ -14,8 +14,9 @@ starts at zero in the native-SOL create path. A holder's exit is bounded by
 that actual reserve, while the virtual ratio may already look positive.
 
 The tests compare fixed token quantities at matched nominal spot ratios and
-different reserve depths. Deeper virtual reserves reduce price impact and may
-make a fixed quantity cheaper to acquire; raising the quote ratio charges
+different reserve depths and at one equal budget. Deeper virtual reserves
+reduce price impact and can make a larger quantity affordable at the same
+budget; raising the quote ratio charges
 honest and coordinated buyers alike. Sequential first buys remain cheaper
 whether submitted by different wallets or grouped into one slot. The model
 does not model validator scheduling or detect bundles. [Jito documents
