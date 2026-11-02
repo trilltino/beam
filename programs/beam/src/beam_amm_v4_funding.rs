@@ -1,6 +1,7 @@
 //! Disabled, source-only funding helper for native-SOL graduation of a
-//! classic-SPL mint to Raydium AMM v4. It is not called by any instruction.
-//! No CPI, account mutation, or transfer occurs here.
+//! classic-SPL mint to Raydium AMM v4. A host-only, always-rollback Beam
+//! diagnostic calls this helper; no production migration calls it.
+//! This module itself performs no CPI, account mutation, or transfer.
 //!
 //! Inputs such as mint owner, current Raydium create-pool fee, and account
 //! balances must eventually be verified from accounts immediately before a

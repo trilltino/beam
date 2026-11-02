@@ -93,6 +93,8 @@ pub mod pump_recovered {
     pub fn initialize(ctx:Context<Initialize>)->Result<()>{global_init::execute(ctx)} pub fn configure_raydium(ctx: Context<ConfigureRaydium>) -> Result<()> { beam_raydium::configure(ctx) } pub fn set_raydium_enabled(ctx: Context<SetRaydiumEnabled>, enabled: bool) -> Result<()> { beam_raydium::set_enabled(ctx, enabled) } pub fn migrate_raydium<'info>(ctx: Context<'_, '_, '_, 'info, MigrateRaydium<'info>>, setup_budget: u64) -> Result<()> { beam_raydium::execute(ctx, setup_budget) }
     #[cfg(feature = "amm-v4-probe")]
     pub fn probe_amm_v4_initialize2<'info>(ctx: Context<'_, '_, '_, 'info, ProbeAmmV4<'info>>, open_time: u64) -> Result<()> { beam_amm_v4_probe::execute(ctx, open_time) }
+    #[cfg(feature = "amm-v4-probe")]
+    pub fn probe_amm_v4_funded_initialize2<'info>(ctx: Context<'_, '_, '_, 'info, ProbeAmmV4Funded<'info>>, open_time: u64, setup_budget: u64, setup_rent_cap: u64) -> Result<()> { beam_amm_v4_probe::execute_funded(ctx, open_time, setup_budget, setup_rent_cap) }
     pub fn update_global_authority(ctx:Context<UpdateGlobalAuthority>)->Result<()>{update_global_authority_handler(ctx)}
 // layout-pad: aligns the next Source site with the original lib.rs line
 
