@@ -54,6 +54,28 @@ test('existing SDK fixture produces exact decoded records with explicit local pr
   assert.equal(indexer.describe().indexedRecords, 2);
   assert.equal(Object.hasOwn(result, 'volume'), false);
   assert.equal(Object.hasOwn(result, 'price'), false);
+  // This local query cannot satisfy the richer website IndexedPage contract.
+  for (const field of ['signature', 'name', 'symbol', 'metadataUri']) {
+    assert.equal(Object.hasOwn(result.items[0], field), false);
+  }
+  assert.equal(Object.hasOwn(indexer.latestCurve(fixture.completeEvent.expected.bondingCurve).item, 'mint'), false);
+});
+
+test('failed replacement suffix preserves the prior fork, source status and page cursor', () => {
+  const indexer = store({ limits: { maxBlocks: 3 } });
+  const root = block('100', 100, null, [event(0), event(1)]);
+  const old = block('101', 101, parentOf(root), [event(0, { dataHex: timestampHex(111n) })]);
+  indexer.replay({ blocks: [root, old] });
+  indexer.markSource({ state: 'stale', detail: 'Synthetic input paused.' });
+  const cursor = events(indexer, { limit: 1 }).nextCursor;
+  const before = state(indexer);
+  const replacement = block('101', 102, parentOf(root), [event(0, { dataHex: timestampHex(222n) })]);
+  const overflow = block('102', 103, parentOf(replacement));
+  assert.throws(() => indexer.replay({ rollbackTo: parentOf(root), blocks: [replacement, overflow] }), code('CAPACITY'));
+  assert.equal(state(indexer), before);
+  assert.equal(events(indexer, { limit: 1, cursor }).items[0].recordIndex, 1);
+  assert.equal(indexer.describe().status.state, 'stale');
+  assert.equal(indexer.describe().knownBlockIdentities, 2);
 });
 
 test('canonical ordering, duplicate positions and exact replay are deterministic and idempotent', () => {

@@ -60,6 +60,13 @@ deployed Beam program. No mint association is invented for a curve account:
 the current curve decoder has no mint field. Completion-event mint filters
 use the actual decoded event field.
 
+This query schema is **not** the merged web adapter's `IndexedPage` schema.
+The fixture records do not provide authenticated transaction signatures,
+token names/symbols/metadata, or a mint-to-curve association. Do not feed a
+query page into `web/src/indexerAdapter.ts` or label it a live token page.
+A separate, verified enrichment and provenance adapter must define those
+fields and pass the web boundary's validation before website integration.
+
 ## Replay, finality and authorization boundary
 
 `createFixtureIndexer({ sourceId, limits? })` creates an in-memory instance.
