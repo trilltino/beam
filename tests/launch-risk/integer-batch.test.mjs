@@ -119,6 +119,8 @@ test('journal replays from JSON, rejects stale CAS and duplicate claims', () => 
   const saved = JSON.parse(JSON.stringify(store.snapshot()));
   const restored = new ResearchJournalStore(planIntegerBatch(config), saved);
   assert.deepEqual(restored.status(), store.status());
+  saved.events[0].slot = '999';
+  assert.deepEqual(restored.status(), store.status());
   assert.throws(() => restored.commit(restored.snapshot().head,
     { kind: 'claim', slot: 3n, id: 'a' }), /duplicate/);
   const second = restored.commit(restored.snapshot().head,

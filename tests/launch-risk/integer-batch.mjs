@@ -190,7 +190,10 @@ export class ResearchJournalStore {
   constructor(plan, journal = genesisJournal(plan)) {
     replayJournal(plan, journal);
     this.#plan = plan;
-    this.#journal = journal;
+    // Persisted JSON is caller-owned and mutable. Retain only detached,
+    // frozen data after replay so it cannot alter this store without commit.
+    this.#journal = Object.freeze({ planHash: journal.planHash, head: journal.head,
+      events: Object.freeze(journal.events.map((event) => Object.freeze({ ...event }))) });
   }
 
   snapshot() { return this.#journal; }
