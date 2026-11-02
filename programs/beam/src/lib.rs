@@ -110,8 +110,6 @@ pub mod pump_recovered {
 
 
 
-
-
     pub fn toggle_create_v2(ctx: Context<AdminGlobal>, enabled: bool) -> Result<()> {
         require_neq!(ctx.accounts.global.create_v2_enabled, enabled, PumpError::NotAuthorized);
         ctx.accounts.global.create_v2_enabled = enabled;
