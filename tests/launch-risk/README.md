@@ -35,6 +35,31 @@ A commit/reveal entry alternative likewise requires explicit binding of
 launch, wallet, amount/limit and salt, plus nonreveal/refund policy. Neither
 candidate is selected or activated.
 
+`batch.mjs` extends that comparison with a bounded, **nonexecutable**
+synthetic batch ledger. Its inputs are abstract token units, a quote target,
+test-only budget labels and slots. It has no on-chain escrow or fund custody.
+It reports exact rational token entitlements and quote spend/refunds; their
+integer floors are diagnostics, not claimable transfers. In oversubscription,
+the exact rational spending sums to the quote target and the remainder is a
+refund. In undersubscription, the quote target remains partly unmet and
+unsold tokens stay unallocated. The plan exposes integer token dust,
+uncollected quote and unresolved per-order quote rounding. **No rounding
+recipient or executable settlement is selected.** Splitting one budget
+preserves its exact rational share, but floor claims can lose units and
+rounding can alter who would owe or receive integer quote units. A sorted
+test label settles ties without a per-wallet bonus; it is not an identity
+check. After a synthetic deadline, a stalled open batch can be cancelled and
+each mock claimant can request its full budget once. This demonstrates a
+required liveness branch, not an actual refund guarantee.
+
+The equal-budget comparison shows that a 100-token first buy costs 112
+fee-free quote units while the second costs 140 on one curve fixture. A
+**hypothetical** batch with a separately chosen 224-unit quote target gives
+two 112-unit budgets 100 tokens each. That target, fill price, deposit and
+refund rule are not Beam policy; the comparison does not prove that the
+batch is better for every honest user or resistant to wealthy coordinated
+buyers. Batch entry also adds wait/cancellation costs and possible censoring.
+
 Before any launch rule is chosen, run adversarial comparisons at equal budgets
 for creator-first access, same-slot multi-transaction bundles, split wallets,
 delayed sniping, fee-switch timing, direct CPI/router bypass, buy-then-dump,
