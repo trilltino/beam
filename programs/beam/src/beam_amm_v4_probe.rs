@@ -282,6 +282,13 @@ pub fn execute_funded<'info>(
             && pool_authority.data_is_empty(),
         BeamError::MigrationNotEnabled
     );
+    // Beam's CreateV2 mints its supply and revokes mint authority. A base mint
+    // that can still mint or freeze tokens is not a faithful Beam graduation
+    // input, even if its current curve and vault balances appear consistent.
+    require!(
+        a.mint.mint_authority == COption::None && a.mint.freeze_authority == COption::None,
+        BeamError::InvalidRaydiumAccount
+    );
     let typed = [
         a.global.key(),
         a.authority.key(),

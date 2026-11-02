@@ -673,6 +673,8 @@ struct FundedCase {
     base_source_donation: u64,
     wsol_source_donation: u64,
     curve_base_vault_donation: u64,
+    active_mint_authority: bool,
+    active_freeze_authority: bool,
     recipient_aliases_curve: bool,
     recipient_aliases_pool: bool,
     insufficient_curve_backing: bool,
@@ -789,9 +791,18 @@ async fn funded_fixture(case: FundedCase) -> Fixture {
             account(system_program::ID, 17_000, vec![], false),
         );
     }
+    let mut base_mint_data = mint_bytes(6);
+    if case.active_mint_authority {
+        base_mint_data[..4].copy_from_slice(&1u32.to_le_bytes());
+        put_key(&mut base_mint_data, 4, Pubkey::new_from_array([97; 32]));
+    }
+    if case.active_freeze_authority {
+        base_mint_data[46..50].copy_from_slice(&1u32.to_le_bytes());
+        put_key(&mut base_mint_data, 50, Pubkey::new_from_array([98; 32]));
+    }
     bank.add_account(
         sdk(MINT),
-        account(SPL_TOKEN_PROGRAM_ID, 100_000_000, mint_bytes(6), false),
+        account(SPL_TOKEN_PROGRAM_ID, 100_000_000, base_mint_data, false),
     );
     bank.add_account(
         sdk(WSOL),
@@ -1108,6 +1119,20 @@ async fn funded_probe_rejects_donations_alias_and_unbacked_quote_before_cpi() {
         ),
         (
             FundedCase {
+                active_mint_authority: true,
+                ..FundedCase::default()
+            },
+            7003,
+        ),
+        (
+            FundedCase {
+                active_freeze_authority: true,
+                ..FundedCase::default()
+            },
+            7003,
+        ),
+        (
+            FundedCase {
                 insufficient_curve_backing: true,
                 ..FundedCase::default()
             },
@@ -1127,12 +1152,14 @@ async fn funded_probe_rejects_donations_alias_and_unbacked_quote_before_cpi() {
         let result = funded_attempt(&mut f, 3).await;
         assert!(
             result.contains(&format!("Custom({expected_code})")),
-            "case recipient_alias={} pool_alias={} curve_base_donation={} base_donation={} wsol_donation={} short={} overflow={}: {result}",
+            "case recipient_alias={} pool_alias={} curve_base_donation={} base_donation={} wsol_donation={} mint_authority={} freeze_authority={} short={} overflow={}: {result}",
             case.recipient_aliases_curve,
             case.recipient_aliases_pool,
             case.curve_base_vault_donation,
             case.base_source_donation,
             case.wsol_source_donation,
+            case.active_mint_authority,
+            case.active_freeze_authority,
             case.insufficient_curve_backing,
             case.overflowing_quote,
         );
