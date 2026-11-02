@@ -14,7 +14,12 @@ compile_error!("amm-v4-probe is a host-only diagnostic and cannot be built for S
 
 use anchor_lang::{
     prelude::*,
-    solana_program::{program::invoke_signed, program_option::COption, program_pack::Pack},
+    solana_program::{
+        instruction::AccountMeta,
+        program::{invoke, invoke_signed},
+        program_option::COption,
+        program_pack::Pack,
+    },
 };
 use anchor_spl::token::{
     self,
@@ -22,7 +27,7 @@ use anchor_spl::token::{
         native_mint,
         state::{Account as SplAccount, AccountState},
     },
-    Mint, SyncNative, Token, TokenAccount, TransferChecked,
+    Mint, Token, TokenAccount, TransferChecked,
 };
 
 use crate::{
@@ -449,12 +454,21 @@ pub fn execute_funded<'info>(
         a.mint.decimals,
     )?;
     move_curve_lamports(&curve, &wsol_source, plan.pool_quote)?;
-    token::sync_native(CpiContext::new(
-        a.token_program.to_account_info(),
-        SyncNative {
-            account: wsol_source.clone(),
-        },
-    ))?;
+    // Include both sides of the direct Beam-owned lamport movement in this
+    // CPI's account metas. The classic SPL processor reads the WSOL account;
+    // Solana also needs the debited curve account to reconcile this inner
+    // instruction's lamport sum. The retained native migration does likewise.
+    let mut sync_ix =
+        token::spl_token::instruction::sync_native(&a.token_program.key(), &wsol_source.key())?;
+    sync_ix.accounts.push(AccountMeta::new(curve.key(), false));
+    invoke(
+        &sync_ix,
+        &[
+            wsol_source.clone(),
+            curve.clone(),
+            a.token_program.to_account_info(),
+        ],
+    )?;
     require!(
         clean_token(&base_vault, &mint, Some(&curve.key()), false)?.amount == 0
             && clean_token(&source, &mint, Some(&pool_authority.key()), false)?.amount == base
