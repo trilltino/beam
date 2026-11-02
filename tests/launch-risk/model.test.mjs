@@ -17,7 +17,7 @@ test('virtual spot value is not actual quote exit liquidity', () => {
 test('same nominal spot proxy can have different reserve depth and price impact', () => {
   const shallow = start();
   const deep = start(10000n, 10000n, 5000n);
-  assert.equal(nominalSpotCapProxy(shallow, 1000n), nominalSpotCapProxy(deep, 1000n));
+  assert.equal(nominalSpotCapProxy(shallow, 10000n), nominalSpotCapProxy(deep, 10000n));
   const a = buyExactTokens(shallow, 100n);
   const b = buyExactTokens(deep, 100n);
   assert.equal(a.quoteIn, 112n);
@@ -63,7 +63,7 @@ test('later buy provides quote liquidity for an earlier holder to exit', () => {
   assert.equal(exitLater.state.virtualToken, start().virtualToken);
 });
 
-test('wallet splitting does not increase total curve supply acquired', () => {
+test('splitting the same requested token quantity preserves final reserves', () => {
   const single = buyExactTokens(start(), 100n);
   const split1 = buyExactTokens(start(), 50n);
   const split2 = buyExactTokens(split1.state, 50n);
@@ -94,6 +94,7 @@ test('research batch allocation is order independent; exact budget share is spli
 
 test('invalid or insolvent synthetic states fail closed', () => {
   assert.throws(() => start(1000n, 1000n, 1001n), /real reserves/);
+  assert.throws(() => nominalSpotCapProxy(start(1000n, 1000n, 500n), 499n), /supply/);
   assert.throws(() => buyExactTokens(start(), 0n), /positive/);
   assert.throws(() => buyExactTokens(start(), 501n), /exceeds/);
   assert.throws(() => buyExactTokens(start(), 500.5), /u64 bigint/);

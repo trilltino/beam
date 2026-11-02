@@ -66,6 +66,7 @@ export function sellExactTokens(state, amount) {
 // nor a quoted amount a holder could receive by selling totalSupply tokens.
 export function nominalSpotCapProxy(state, totalSupply) {
   totalSupply = u64(totalSupply, 'totalSupply', true);
+  if (totalSupply < state.realToken) throw new RangeError('supply cannot be below real token reserves');
   return totalSupply * state.virtualQuote / state.virtualToken;
 }
 
