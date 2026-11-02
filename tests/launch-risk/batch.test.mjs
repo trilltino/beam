@@ -13,9 +13,18 @@ function conservation(plan) {
   const rows = plan.rows;
   const sum = (field) => rows.reduce((total, row) => total + BigInt(row[field].floor), 0n);
   const budgets = rows.reduce((total, row) => total + BigInt(row.budget), 0n);
-  assert.equal(sum('tokens') + BigInt(plan.integerTokenDust), BigInt(plan.tokenCap));
-  assert.equal(sum('quoteSpend') + BigInt(plan.uncollectedQuoteTarget), BigInt(plan.quoteTarget));
+  assert.equal(sum('tokens') + BigInt(plan.unallocatedTokenUnits), BigInt(plan.tokenCap));
+  assert.equal(sum('quoteSpend') + BigInt(plan.integerUncollectedQuoteUnits), BigInt(plan.quoteTarget));
   assert.equal(sum('quoteSpend') + sum('quoteRefund') + BigInt(plan.unresolvedQuoteRounding), budgets);
+  const tokenDenominator = BigInt(plan.exactUnsoldTokens.denominator);
+  assert.equal(sum('tokens') * tokenDenominator
+    + BigInt(plan.exactUnsoldTokens.numerator)
+    + BigInt(plan.fractionalTokenRemainder.numerator),
+    BigInt(plan.tokenCap) * tokenDenominator);
+  const quoteDenominator = BigInt(plan.fractionalQuoteSpendRemainder.denominator);
+  assert.equal((sum('quoteSpend') + BigInt(plan.exactUnmetQuoteTarget.floor))
+    * quoteDenominator + BigInt(plan.fractionalQuoteSpendRemainder.numerator),
+    BigInt(plan.quoteTarget) * quoteDenominator);
   for (const row of rows) {
     const spent = BigInt(row.quoteSpend.numerator) * BigInt(row.quoteRefund.denominator);
     const refund = BigInt(row.quoteRefund.numerator) * BigInt(row.quoteSpend.denominator);
@@ -45,8 +54,8 @@ test('oversubscription has exact rational refunds without hidden allocation', ()
     assert.equal(row.quoteSpend.floor, '50');
     assert.equal(row.quoteRefund.floor, '30');
   }
-  assert.equal(plan.integerTokenDust, '0');
-  assert.equal(plan.uncollectedQuoteTarget, '0');
+  assert.equal(plan.unallocatedTokenUnits, '0');
+  assert.equal(plan.integerUncollectedQuoteUnits, '0');
   assert.equal(plan.unresolvedQuoteRounding, '0');
   conservation(plan);
 });
@@ -54,8 +63,12 @@ test('oversubscription has exact rational refunds without hidden allocation', ()
 test('undersubscription leaves unallocated tokens and an unmet quote target', () => {
   const plan = planBatch(input([{ id: 'a', budget: 40n }, { id: 'b', budget: 40n }])).plan;
   assert.equal(plan.oversubscribed, false);
-  assert.equal(plan.integerTokenDust, '20');
-  assert.equal(plan.uncollectedQuoteTarget, '20');
+  assert.equal(plan.exactUnsoldTokens.numerator, '2000');
+  assert.equal(plan.exactUnsoldTokens.denominator, '100');
+  assert.equal(plan.fractionalTokenRemainder.numerator, '0');
+  assert.equal(plan.unallocatedTokenUnits, '20');
+  assert.equal(plan.exactUnmetQuoteTarget.floor, '20');
+  assert.equal(plan.integerUncollectedQuoteUnits, '20');
   assert.equal(plan.unresolvedQuoteRounding, '0');
   assert.deepEqual(plan.rows.map((row) => row.quoteRefund.floor), ['0', '0']);
   conservation(plan);
@@ -73,8 +86,9 @@ test('split wallets preserve exact rational share but cannot gain floor tokens',
   assert.equal(splitA[0].tokens.denominator, wholeA.tokens.denominator);
   assert.ok(splitA.reduce((sum, row) => sum + BigInt(row.tokens.floor), 0n)
     <= BigInt(wholeA.tokens.floor));
-  assert.equal(whole.integerTokenDust, '1');
-  assert.equal(split.integerTokenDust, '2');
+  assert.equal(whole.exactUnsoldTokens.numerator, '0');
+  assert.equal(whole.unallocatedTokenUnits, '1');
+  assert.equal(split.unallocatedTokenUnits, '2');
   assert.equal(split.unresolvedQuoteRounding, '2');
   conservation(whole);
   conservation(split);
@@ -104,14 +118,17 @@ test('duplicate claims fail and stale operators cannot settle a stalled batch', 
   assert.equal(settled.phase, 'settled');
   const first = stepBatch(settled, { kind: 'claim', slot: 3n, id: 'a' });
   assert.equal(first.claim.tokens.floor, '60');
+  assert.throws(() => stepBatch(settled, { kind: 'claim', slot: 3n, id: 'a' }), /stale state/);
   assert.throws(() => stepBatch(first.state, { kind: 'claim', slot: 3n, id: 'a' }), /duplicate/);
   assert.throws(() => stepBatch(first.state, { kind: 'cancel', slot: 5n }), /expired open/);
-  assert.throws(() => stepBatch(open, { kind: 'settle', slot: 5n }), /outside/);
-  const cancelled = stepBatch(open, { kind: 'cancel', slot: 5n });
+  const stalled = planBatch(input([{ id: 'a', budget: 60n }, { id: 'b', budget: 40n }]));
+  assert.throws(() => stepBatch(stalled, { kind: 'settle', slot: 5n }), /outside/);
+  const cancelled = stepBatch(stalled, { kind: 'cancel', slot: 5n });
   assert.equal(cancelled.phase, 'cancelled');
   const refund = stepBatch(cancelled, { kind: 'claim', slot: 5n, id: 'a' });
   assert.equal(refund.claim.tokens.floor, '0');
   assert.equal(refund.claim.quoteRefund.floor, '60');
+  assert.throws(() => stepBatch(cancelled, { kind: 'claim', slot: 5n, id: 'a' }), /stale state/);
   assert.throws(() => stepBatch(refund.state, { kind: 'claim', slot: 5n, id: 'a' }), /duplicate/);
 });
 

@@ -42,15 +42,20 @@ It reports exact rational token entitlements and quote spend/refunds; their
 integer floors are diagnostics, not claimable transfers. In oversubscription,
 the exact rational spending sums to the quote target and the remainder is a
 refund. In undersubscription, the quote target remains partly unmet and
-unsold tokens stay unallocated. The plan exposes integer token dust,
-uncollected quote and unresolved per-order quote rounding. **No rounding
+unsold tokens stay unallocated. The plan separates exact unsold token and
+unmet quote amounts from fractional floor remainders, and reports total
+integer unallocated units. **No rounding
 recipient or executable settlement is selected.** Splitting one budget
 preserves its exact rational share, but floor claims can lose units and
 rounding can alter who would owe or receive integer quote units. A sorted
 test label settles ties without a per-wallet bonus; it is not an identity
 check. After a synthetic deadline, a stalled open batch can be cancelled and
-each mock claimant can request its full budget once. This demonstrates a
-required liveness branch, not an actual refund guarantee.
+each mock claimant can request its full budget once along one in-memory state
+chain. A consumed snapshot cannot be reused by this process, but there is no
+durable replay protection, cross-process coordination or actual refund. This
+only demonstrates a required liveness branch.
+The implementation uses arbitrary-precision `BigInt`; accepting u64 inputs
+does not prove u128 or on-chain arithmetic bounds for a real batch program.
 
 The equal-budget comparison shows that a 100-token first buy costs 112
 fee-free quote units while the second costs 140 on one curve fixture. A

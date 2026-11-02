@@ -3,6 +3,7 @@
 const U64_MAX = (1n << 64n) - 1n;
 const MAX_ORDERS = 128; // Research input-work bound, not a launch parameter.
 const states = new WeakSet();
+const consumedStates = new WeakSet();
 
 function u64(value, name, positive = false) {
   if (typeof value !== 'bigint' || value < 0n || value > U64_MAX || (positive && value === 0n)) {
@@ -93,6 +94,10 @@ export function planBatch(input) {
   const allocatedFloor = rows.reduce((sum, row) => sum + BigInt(row.tokens.floor), 0n);
   const quoteSpendFloor = rows.reduce((sum, row) => sum + BigInt(row.quoteSpend.floor), 0n);
   const quoteRefundFloor = rows.reduce((sum, row) => sum + BigInt(row.quoteRefund.floor), 0n);
+  const tokenRemainderNumerator = rows.reduce((sum, row) =>
+    sum + BigInt(row.tokens.numerator) % denominator, 0n);
+  const quoteSpendRemainderNumerator = rows.reduce((sum, row) =>
+    sum + BigInt(row.quoteSpend.numerator) % totalBudget, 0n);
   const plan = Object.freeze({
     kind: 'disabled-rational-batch-research', executable: false,
     batchId, tokenCap: tokenCap.toString(), quoteTarget: quoteTarget.toString(),
@@ -100,8 +105,12 @@ export function planBatch(input) {
     openSlot: openSlot.toString(), closeSlot: closeSlot.toString(),
     settlementDeadlineSlot: deadline.toString(), rows: Object.freeze(rows),
     exactRationalTokenDenominator: denominator.toString(),
-    integerTokenDust: (tokenCap - allocatedFloor).toString(),
-    uncollectedQuoteTarget: (quoteTarget - quoteSpendFloor).toString(),
+    exactUnsoldTokens: ratio(tokenCap * (denominator - totalBudget), denominator),
+    fractionalTokenRemainder: ratio(tokenRemainderNumerator, denominator),
+    unallocatedTokenUnits: (tokenCap - allocatedFloor).toString(),
+    exactUnmetQuoteTarget: ratio(quoteTarget - collectedTarget, 1n),
+    fractionalQuoteSpendRemainder: ratio(quoteSpendRemainderNumerator, totalBudget),
+    integerUncollectedQuoteUnits: (quoteTarget - quoteSpendFloor).toString(),
     unresolvedQuoteRounding: (totalBudget - quoteSpendFloor - quoteRefundFloor).toString(),
   });
   return makeState(plan, 'open', openSlot, []);
@@ -110,6 +119,7 @@ export function planBatch(input) {
 /** Only tracks mock claim eligibility. It never executes/refunds assets. */
 export function stepBatch(state, action) {
   if (!states.has(state)) throw new TypeError('state was not created by this model');
+  if (consumedStates.has(state)) throw new RangeError('stale state already advanced');
   if (action === null || typeof action !== 'object') throw new TypeError('invalid action');
   const kindField = Object.getOwnPropertyDescriptor(action, 'kind');
   if (!kindField || !Object.hasOwn(kindField, 'value')) throw new TypeError('invalid action kind');
@@ -124,10 +134,12 @@ export function stepBatch(state, action) {
     if (state.phase !== 'open' || slot < closeSlot || slot > deadline) {
       throw new RangeError('settlement outside open close window');
     }
+    consumedStates.add(state);
     return makeState(state.plan, 'settled', slot, state.claimed);
   }
   if (kind === 'cancel') {
     if (state.phase !== 'open' || slot <= deadline) throw new RangeError('cancellation requires expired open batch');
+    consumedStates.add(state);
     return makeState(state.plan, 'cancelled', slot, state.claimed);
   }
   if (!['settled', 'cancelled'].includes(state.phase)) throw new RangeError('claim requires settled or cancelled batch');
@@ -135,6 +147,7 @@ export function stepBatch(state, action) {
   const row = state.plan.rows.find((entry) => entry.id === id);
   if (!row) throw new RangeError('unknown order');
   if (state.claimed.includes(id)) throw new RangeError('duplicate claim');
+  consumedStates.add(state);
   return Object.freeze({
     state: makeState(state.plan, state.phase, slot, [...state.claimed, id].sort()),
     // Cancellation makes the full synthetic deposit refundable. Settled
