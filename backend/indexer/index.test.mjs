@@ -104,6 +104,10 @@ test('synthetic web fixture requires explicit matching provenance, event and cur
   assert.deepEqual(result.page.tokens[0].mint, fixture.completeEvent.expected.mint);
   assert.equal(result.page.accounts[0].address, fixture.completeEvent.expected.bondingCurve);
   assert.equal(result.page.events[0].id, `${'1'.repeat(64)}:0`);
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.page.tokens[0]), true);
+  assert.throws(() => { result.live = true; }, TypeError);
+  assert.throws(() => { result.page.source.finality = 'finalized'; }, TypeError);
   for (const changed of [
     { sourceId: 'other' }, { kind: 'verified-chain' },
     { metadata: { ...evidence.metadata, mint: pk(9) } },

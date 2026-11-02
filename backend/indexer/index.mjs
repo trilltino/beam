@@ -441,8 +441,8 @@ class FixtureIndexer {
       events: [{ id: `${assertedSignature}:${eventIndex}`, signature: assertedSignature,
         eventIndex, slot: event.block.slot, mint, kind: 'curve_complete' }],
     };
-    return detached({ kind: 'synthetic-preview', live: false, verifiedChain: false,
-      sourceId: this.#sourceId, stateDigest: description.stateDigest, revision: description.revision, page });
+    return freeze(detached({ kind: 'synthetic-preview', live: false, verifiedChain: false,
+      sourceId: this.#sourceId, stateDigest: description.stateDigest, revision: description.revision, page }));
   }
 }
 
