@@ -13,15 +13,14 @@ use anchor_lang::solana_program::{
 use beam_program::{
     beam_amm_v4::{
         derive_pool_addresses, encode_initialize2, initialize2_instruction, user_lp_ata,
-        Initialize2Accounts, Initialize2Args, MintKey, ASSOCIATED_TOKEN_PROGRAM_ID,
-        DEVNET_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
+        Initialize2Accounts, Initialize2Args, MintKey, DEVNET_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID,
     },
     beam_amm_v4_snapshot::{validate_post_initialize2, AMM_INFO_DATA_LEN, TARGET_ORDERS_DATA_LEN},
 };
 use solana_program_test::{processor, ProgramTest, ProgramTestContext};
 use solana_sdk::{
     account::Account, bpf_loader_upgradeable, pubkey::Pubkey, signature::Signer, system_program,
-    sysvar, transaction::Transaction,
+    transaction::Transaction,
 };
 
 const BEAM_MINT: Pubkey = Pubkey::new_from_array([42; 32]);
