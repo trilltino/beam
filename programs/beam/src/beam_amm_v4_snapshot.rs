@@ -620,6 +620,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_cross_role_aliases_before_decoding_post_cpi_state() {
+        // Fee custody, Raydium state, LP custody and the Beam signer must not
+        // be interchangeable with another writable role, even if the copied
+        // AccountInfo happens to contain otherwise valid packed bytes.
+        for (replacement, existing) in [(13, 10), (11, 4), (18, 16), (15, 17)] {
+            let (program, mut infos, mint, seed, args) = fixture(0, 100);
+            infos[replacement] = infos[existing].clone();
+            assert_eq!(
+                validate_post_initialize2(&program, &infos, &mint, &seed, args, 100),
+                Err(SnapshotError::AliasedAccounts),
+                "alias at role {replacement} with role {existing}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_mint_authority_native_backing_and_fee_destination_substitutions() {
         let (program, mut infos, mint, seed, args) = fixture(0, 100);
         infos[9] = info(
