@@ -418,7 +418,8 @@ class FixtureIndexer {
     const event = completion.items[0];
     const snapshot = this.latestCurve(curveAccount);
     const curve = snapshot.item;
-    if (!curve || event.id !== evidence.event.recordId || event.decoded.bondingCurve !== curveAccount
+    if (!curve || event.id !== evidence.event.recordId || eventIndex !== event.recordIndex
+      || event.decoded.bondingCurve !== curveAccount
       || event.decoded.quoteMint !== curve.decoded.quoteMint || curve.address !== curveAccount
       || curve.owner !== PROGRAM_ID || curve.decoded.creator !== creator || !curve.decoded.complete
       || curve.decoded.isMayhemMode || curve.decoded.isCashbackCoin

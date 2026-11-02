@@ -76,6 +76,9 @@ assertion (`recordId`, 64-byte base58 `signature`, `eventIndex`). It uses one
 retained CompleteEvent and a completed curve snapshot; the mint, curve,
 creator and quote association must agree, and stale sources, duplicate
 completions, substituted records, Mayhem/cashback curves and reorged IDs fail.
+The synthetic `eventIndex` must equal that event's local `recordIndex`; this
+consistency check does not authenticate a transaction log position or the
+caller-supplied signature.
 The native-SOL quote sentinel maps to the web schema's `null` quote mint.
 The output has a web-shaped `page` inside a wrapper marked
 `kind: 'synthetic-preview'`, `live: false`, `verifiedChain: false`, and a

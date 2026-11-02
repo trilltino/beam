@@ -119,6 +119,8 @@ test('synthetic web fixture requires explicit matching provenance, event and cur
     { event: { ...evidence.event, recordId: 'forged' } },
     { event: { ...evidence.event, signature: '1'.repeat(63) } },
   ]) assert.throws(() => buildSyntheticWebFixture(indexer, { ...evidence, ...changed }), (error) => error instanceof IndexerError);
+  assert.throws(() => buildSyntheticWebFixture(indexer,
+    { ...evidence, event: { ...evidence.event, eventIndex: 9999 } }), code('ASSOCIATION'));
   assert.throws(() => buildSyntheticWebFixture(indexer, { ...evidence, metadata: { ...evidence.metadata, symbol: undefined } }), code('INVALID_ARGUMENT'));
   assert.throws(() => buildSyntheticWebFixture({}, evidence), code('INVALID_ARGUMENT'));
 });
