@@ -51,6 +51,28 @@ pub struct BeamAmmV4Config {
     pub max_create_pool_fee: u64,
 }
 
+/// Seed of the per-pool rights record that the AMM v4 quote reader in draft PR #49 requires.
+pub const AMM_V4_RIGHTS_SEED: &[u8] = b"beam-amm-rights";
+/// Account space of that record: discriminator, six keys, revision, paused.
+pub const AMM_V4_RIGHTS_SPACE: usize = 8 + 6 * 32 + 8 + 1;
+
+/// Byte-for-byte the layout of `AmmV4Rights` in draft PR #49 (`beam_amm_v4_companion.rs`, head
+/// 32c661d), including its discriminator, `sha256("account:AmmV4Rights")[..8]`. Migration writes it
+/// so a graduated token is quotable without a separate `register` call. When #49 lands, delete this
+/// type and use its `AmmV4Rights`; the bytes are identical, but #49's `register` would then fail
+/// with an account-already-in-use error for a migrated pool, which is the intended outcome.
+#[account(discriminator = [88, 155, 79, 159, 221, 232, 159, 98])]
+pub struct BeamAmmV4Rights {
+    pub pool: Pubkey,
+    pub mint: Pubkey,
+    pub market_seed: Pubkey,
+    pub creator: Pubkey,
+    pub creator_payout: Pubkey,
+    pub donation_record: Pubkey,
+    pub revision: u64,
+    pub paused: bool,
+}
+
 #[account]
 pub struct BeamAmmV4Receipt {
     pub mint: Pubkey,
@@ -153,6 +175,9 @@ pub struct MigrateAmmV4<'info> {
     pub authority_lp: UncheckedAccount<'info>,
     #[account(init, payer = user, space = 8 + 3 * 32 + 8 * 7 + 1, seeds = [AMM_V4_RECEIPT_SEED, mint.key().as_ref()], bump)]
     pub receipt: Box<Account<'info, BeamAmmV4Receipt>>,
+    /// Keyed by the pool address; the handler requires `amm_pool` to equal the derived pool.
+    #[account(init, payer = user, space = AMM_V4_RIGHTS_SPACE, seeds = [AMM_V4_RIGHTS_SEED, amm_pool.key().as_ref()], bump)]
+    pub rights: Box<Account<'info, BeamAmmV4Rights>>,
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
@@ -462,6 +487,20 @@ pub fn execute_migration(ctx: Context<MigrateAmmV4>, open_time: u64, max_create_
     // and the curve must still cover rent and fee claims.
     checked_move(&curve_info, &a.withdraw_authority.to_account_info(), plan.migration_fee)?;
     require!(curve_info.lamports() >= plan.protected_floor, BeamError::InvalidMigrationBalance);
+
+    // The quote reader needs a rights record per pool. It starts as #49's `register` would create
+    // it: the curve's creator is both creator and payout wallet, with no donation selection.
+    let creator = ctx.accounts.bonding_curve.creator;
+    ctx.accounts.rights.set_inner(BeamAmmV4Rights {
+        pool: p.amm,
+        mint,
+        market_seed: mint,
+        creator,
+        creator_payout: creator,
+        donation_record: Pubkey::default(),
+        revision: 0,
+        paused: false,
+    });
 
     let receipt = &mut ctx.accounts.receipt;
     receipt.mint = mint;

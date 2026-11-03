@@ -29,6 +29,9 @@ use spl_token::state::{Account as TokenAccount, AccountState, Mint};
 
 const BEAM: Pubkey = pubkey!("GdaQ7RHbGKGEL5Px66tQP78S67XcgxYAzFUwja71qSJP");
 const SYSTEM: Pubkey = pubkey!("11111111111111111111111111111111");
+const CURVE_CREATOR: Pubkey = pubkey!("Stake11111111111111111111111111111111111111");
+/// `sha256("account:AmmV4Rights")[..8]`, the discriminator draft PR #49 reads.
+const DISC_RIGHTS: [u8; 8] = [88, 155, 79, 159, 221, 232, 159, 98];
 
 // Anchor discriminators: sha256("global:<ix>" or "account:<Type>")[..8].
 const DISC_CONFIGURE: [u8; 8] = [144, 16, 143, 164, 78, 235, 65, 59];
@@ -152,7 +155,7 @@ fn curve_bytes() -> Vec<u8> {
         put_u64(&mut d, v);
     }
     d.push(1); // complete
-    put_key(&mut d, &Pubkey::new_unique());
+    put_key(&mut d, &CURVE_CREATOR);
     d.extend_from_slice(&[0, 0]); // mayhem, cashback
     put_key(&mut d, &zero); // native SOL quote
     put_u64(&mut d, 0);
@@ -194,6 +197,7 @@ struct Fx {
     authority_wsol: Pubkey,
     authority_lp: Pubkey,
     receipt: Pubkey,
+    rights: Pubkey,
     ray: beam_amm_v4_validator::DerivedPool,
     donations: bool,
 }
@@ -219,6 +223,7 @@ fn build(opts: Opts) -> (ProgramTest, Fx) {
         authority_wsol: spl_associated_token_account::get_associated_token_address(&authority, &spl_token::native_mint::id()),
         authority_lp: spl_associated_token_account::get_associated_token_address(&authority, &ray.lp_mint),
         receipt: pda(&[b"beam-amm-v4-migration", mint.as_ref()]),
+        rights: pda(&[b"beam-amm-rights", ray.amm.as_ref()]),
         ray,
         donations: opts.donations,
     };
@@ -317,6 +322,7 @@ fn migrate_ix(fx: &Fx, user: &Pubkey, max_fee: u64, budget: u64) -> Instruction 
         meta(fx.ray.fee_destination, true, false),
         meta(fx.authority_lp, true, false),
         meta(fx.receipt, true, false),
+        meta(fx.rights, true, false),
         meta(spl_token::id(), false, false),
         meta(spl_associated_token_account::id(), false, false),
         meta(SYSTEM, false, false),
@@ -351,7 +357,7 @@ fn amount(a: &Account) -> u64 {
 /// Every account a migration could touch, for exact rollback comparison.
 async fn snapshot(ctx: &mut ProgramTestContext, fx: &Fx) -> Vec<Option<Account>> {
     let keys = [
-        fx.curve, fx.curve_vault, fx.withdraw, fx.authority, fx.authority_base, fx.authority_wsol, fx.authority_lp, fx.receipt, fx.config,
+        fx.curve, fx.curve_vault, fx.withdraw, fx.authority, fx.authority_base, fx.authority_wsol, fx.authority_lp, fx.receipt, fx.rights, fx.config,
         fx.ray.amm, fx.ray.lp_mint, fx.ray.coin_vault, fx.ray.pc_vault, fx.ray.target_orders, fx.ray.fee_destination, fx.mint,
     ];
     let mut out = Vec::new();
@@ -387,7 +393,7 @@ const AMM_INFO_LEN: usize = 752;
 /// market seed), vaults owned by Raydium's authority with no delegate or close authority,
 /// and a WSOL vault fully backed by lamports. These are the checks the AMM v4 quote adapter
 /// in draft PR #49 makes on raw pool bytes; the offsets are pinned in `pool_layout.rs`.
-/// Its separate rights-registry account is not created by this instruction.
+/// The rights record it also needs is written by the migration; see `assert_rights_record`.
 async fn assert_quote_ready(ctx: &mut ProgramTestContext, fx: &Fx, coin: u64, pc: u64) {
     let pool = account(ctx, &fx.ray.amm).await.unwrap().data;
     let key_at = |at: usize| Pubkey::try_from(&pool[at..at + 32]).unwrap();
@@ -413,6 +419,23 @@ async fn assert_quote_ready(ctx: &mut ProgramTestContext, fx: &Fx, coin: u64, pc
             _ => panic!("unexpected native flag on {vault}"),
         }
     }
+}
+
+/// The per-pool rights record, byte for byte what draft PR #49's `register` writes for a
+/// fresh pool: its discriminator, then pool, mint, market seed (the mint), creator and payout
+/// (both the curve's creator), an unset donation record, revision 0 and not paused.
+async fn assert_rights_record(ctx: &mut ProgramTestContext, fx: &Fx) {
+    let rights = account(ctx, &fx.rights).await.expect("rights record");
+    assert_eq!(rights.owner, BEAM);
+    let mut expected = DISC_RIGHTS.to_vec();
+    for key in [fx.ray.amm, fx.mint, fx.mint, CURVE_CREATOR, CURVE_CREATOR, Pubkey::default()] {
+        put_key(&mut expected, &key);
+    }
+    put_u64(&mut expected, 0);
+    expected.push(0);
+    assert_eq!(expected.len(), 209);
+    assert_eq!(rights.data, expected);
+    assert_eq!(rights.lamports, rent().minimum_balance(209));
 }
 
 /// Runs the migration and checks every effect against the planned amounts.
@@ -468,6 +491,7 @@ async fn assert_migrates(ctx: &mut ProgramTestContext, fx: &Fx) {
     let words: Vec<u64> = (0..7).map(|i| u64_at(&r.data, 104 + 8 * i)).collect();
     assert_eq!(words, vec![VAULT_TOKENS, pc, MIGRATION_FEE, CREATE_FEE, user_lp, spent, 0]);
     assert_eq!(r.data[160], 0, "LP disposition is unresolved");
+    assert_rights_record(ctx, fx).await;
 }
 
 #[tokio::test]
@@ -574,7 +598,11 @@ async fn substituted_accounts_are_rejected() {
         let mut ix = migrate_ix(&fx, &payer, CREATE_FEE, budget());
         ix.accounts[index].pubkey = Pubkey::new_unique();
         let result = send(&mut ctx, &[ix]).await;
-        if beam_error {
+        if name == "pool" {
+            // The rights record's address is derived from the pool, so Anchor's seeds check
+            // (ConstraintSeeds, 2006) rejects a substituted pool before Beam's own check runs.
+            assert_custom(result, 2006);
+        } else if beam_error {
             assert_custom(result, ERR_INVALID_ACCOUNT);
         } else {
             assert_failed(result);
@@ -613,7 +641,7 @@ async fn funding_for_a_higher_fee_cap_is_refunded_to_the_exact_cost() {
     assert_eq!(lamports(&account(&mut ctx, &fx.authority).await), AUTHORITY_DONATION);
     let payer_after = account(&mut ctx, &payer).await.unwrap().lamports;
     // The payer pays the exact cost, the receipt's rent and a small transaction fee; the extra 5M comes back.
-    let receipt_rent = rent().minimum_balance(r.data.len());
+    let receipt_rent = rent().minimum_balance(r.data.len()) + rent().minimum_balance(209);
     let paid = payer_before - payer_after;
     assert!(paid >= budget() + receipt_rent, "payer paid less than the exact cost: {paid}");
     assert!(paid <= budget() + receipt_rent + 100_000, "refund missing: {paid} lamports left the payer");

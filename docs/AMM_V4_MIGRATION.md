@@ -28,7 +28,7 @@ file lands.
 | --- | --- | --- |
 | `configure_amm_v4(max_create_pool_fee)` | `Global.authority` | Creates the `beam-amm-v4-config` PDA with `enabled = false` and the largest Raydium create-pool fee Beam will pay. |
 | `set_amm_v4_enabled(enabled)` | `Global.authority` | `false` always works. `true` is rejected unless the program was built with `experimental-amm-v4`, which no release uses. |
-| `migrate_amm_v4(open_time, max_create_pool_fee, setup_budget)` | anyone, paying | Graduates one completed curve. Requires `config.enabled` and the inherited `Global.enable_migrate`. |
+| `migrate_amm_v4(open_time, max_create_pool_fee, setup_budget)` | anyone, paying | Graduates one completed curve and writes its rights record. Requires `config.enabled` and the inherited `Global.enable_migrate`. |
 
 `max_create_pool_fee` must not exceed the stored cap, and Raydium's *current*
 fee, read from its canonical config immediately before the CPI, must not exceed
@@ -79,6 +79,7 @@ CPI. Keep that ordering when editing the handler.
 | Config | `["beam-amm-v4-config"]` |
 | Migration authority (system-owned signer) | `["amm-v4-migration-authority", mint]` |
 | Receipt | `["beam-amm-v4-migration", mint]` |
+| Rights record | `["beam-amm-rights", pool]` |
 
 The seeds are versioned so state from the superseded CPMM adapter can never look valid here.
 The receipt holds mint, pool, LP mint, amounts, both fees, LP issued, setup spent, `open_time`
@@ -144,10 +145,13 @@ pools this instruction produces:
   `SwapOnly` status, zero pending PnL, identity fields equal to Beam-derived addresses (the mint is
   the market seed), vaults owned by Raydium's authority with no delegate or close authority, and a
   fully backed WSOL vault. A pool migrated here satisfies all of them.
-- **Gap.** #49's reader also requires an `AmmV4Rights` account for the pool, created by its own
-  `register` instruction with authority and creator signatures. `migrate_amm_v4` does not create
-  one, so a token graduated by this instruction is not quotable until rights are registered. How
-  rights, creator payouts and donation records relate is the open design that PR carries.
+- **Rights record, written by the migration.** #49's reader also requires an `AmmV4Rights` account
+  for the pool. `migrate_amm_v4` now creates it (`BeamAmmV4Rights`, paid by the caller) with the same
+  discriminator and bytes #49's `register` writes: pool, mint, market seed (the mint), the curve's
+  creator as both creator and payout wallet, no donation selection, revision 0, not paused. A test
+  compares the account byte for byte. When #49 lands, replace `BeamAmmV4Rights` with its
+  `AmmV4Rights`; #49's `register` then fails for a migrated pool with account-already-in-use, which is
+  intended. The layout follows #49 at head `32c661d` and must be re-checked if that PR changes.
 - **Valuation.** The reader uses spot vault reserves minus pending PnL. That is not a TWAP or oracle
   and can be moved by one trade; it should not price anything an attacker can profit from
   without a manipulation bound.
@@ -174,7 +178,7 @@ pools this instruction produces:
    and graduation then fails closed (tested) with no way to retry. A fresh caller-supplied seed
    recorded in the receipt avoids this, at the cost of a non-deterministic pool address. Pick one
    before activation.
-4. **Rights registry.** Whether migration should create the pool's rights record, or a separate
-   instruction does, before graduated tokens can be quoted (see the quote path above).
+4. **Rights record contents.** Creator payout defaults to the curve creator and donation selection
+   starts empty, copied from #49's `register`. Those choices are that PR's proposal, not approved.
 5. **Curve state.** Reserves are zeroed after migration, as the CPMM candidate did. A dedicated
    migrated flag on the curve would be clearer.
