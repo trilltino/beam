@@ -162,6 +162,38 @@ pub struct MigrateV4<'info> {
     pub rent: Sysvar<'info, Rent>,
 }
 
+/// How Raydium uses an account in `Initialize2`: read-only, writable, or writable and signing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Write,
+    Sign,
+}
+
+/// One table gives both the account list and its access flags in Raydium's fixed 19-account order, so
+/// the two cannot drift apart; the array type fails to compile unless the table has exactly 19 rows.
+macro_rules! initialize2_table {
+    ($($field:ident : $access:ident),+ $(,)?) => {
+        const INITIALIZE2_ACCESS: [Access; abi::INITIALIZE2_ACCOUNT_COUNT] = [$(Access::$access),+];
+
+        /// The `Initialize2` accounts in order, followed by Raydium's program for the CPI.
+        fn initialize2_infos<'info>(a: &MigrateV4<'info>) -> Vec<AccountInfo<'info>> {
+            let mut infos = Vec::with_capacity(abi::INITIALIZE2_ACCOUNT_COUNT + 1);
+            $(infos.push(a.$field.to_account_info());)+
+            infos.push(a.amm_program.to_account_info());
+            infos
+        }
+    };
+}
+
+initialize2_table! {
+    token_program: Read, associated_token_program: Read, system_program: Read, rent: Read,
+    pool: Write, amm_authority: Read, lp_mint: Write, mint: Read, pc_mint: Read,
+    coin_vault: Write, pc_vault: Write, target_orders: Write, amm_config: Read, fee_account: Write,
+    mint: Read, // the market seed is the mint
+    migrator: Sign, coin_source: Write, pc_source: Write, lp_account: Write,
+}
+
 /// The curve's recorded state that fixes the migration amounts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanInput {
@@ -211,6 +243,14 @@ struct Before {
     coin: u64,
     pc: u64,
     fee_account: u64,
+}
+
+/// A migration that passed `check` and `snapshot`; each step that moves money or reads the result is a method.
+struct Migration<'a, 'info> {
+    a: &'a MigrateV4<'info>,
+    req: Req,
+    c: Checked,
+    before: Before,
 }
 
 /// Fixes the migration amounts from the curve's recorded state and checks it can cover its liabilities.
@@ -357,6 +397,14 @@ fn check_source(state: &token::spl_token::state::Account, mint: &Pubkey, owner: 
 
 /// Checks the request and every account and fixes the amounts, before anything moves.
 fn check(a: &MigrateV4, req: &Req) -> Result<Checked> {
+    check_request(a, req)?;
+    let pool = check_addresses(a, req)?;
+    let (pool_fee, setup) = check_funding(a, req)?;
+    Ok(Checked { pool, pool_fee, setup, plan: curve_plan(a)? })
+}
+
+/// The caller's request against the config, the clock and the curve's state.
+fn check_request(a: &MigrateV4, req: &Req) -> Result<()> {
     require_keys_eq!(a.config.raydium_program, AMM_V4_PROGRAM, BeamError::InvalidRaydiumAccount);
     require!(a.global.enable_migrate, BeamError::MigrationNotEnabled);
     require!(req.max_pool_fee <= a.config.max_pool_fee, BeamError::CreatePoolFeeExceedsCap);
@@ -365,25 +413,33 @@ fn check(a: &MigrateV4, req: &Req) -> Result<Checked> {
     require!(a.bonding_curve.complete && a.bonding_curve.real_token_reserves == 0, PumpError::BondingCurveNotComplete);
     crate::beam_policy::mayhem(a.bonding_curve.is_mayhem_mode)?;
     require_keys_eq!(a.bonding_curve.quote_mint, Pubkey::default(), PumpError::UnsupportedQuoteMint);
+    Ok(())
+}
 
-    let curve_info = a.bonding_curve.to_account_info();
+/// Every Raydium account is the address derived from the mint, and none of the new ones exists yet.
+fn check_addresses(a: &MigrateV4, req: &Req) -> Result<abi::PoolAddresses> {
     let authority = a.migrator.key();
     ensure(
-        a.withdraw_authority.key != curve_info.key && a.withdraw_authority.key != &authority && a.user.key != &authority,
+        a.withdraw_authority.key != &a.bonding_curve.key() && a.withdraw_authority.key != &authority && a.user.key != &authority,
         BeamError::InvalidRaydiumAccount,
         "the fee recipient, the caller and the curve must differ from the migration authority",
     )?;
 
     let pool = abi::derive_pool_addresses(&AMM_V4_PROGRAM, &req.mint).map_err(|_| error!(BeamError::InvalidRaydiumAccount))?;
-    check_key("amm_config", &a.amm_config.to_account_info(), &pool.config)?;
-    check_key("pool", &a.pool.to_account_info(), &pool.amm)?;
-    check_key("amm_authority", &a.amm_authority.to_account_info(), &pool.authority)?;
-    check_key("lp_mint", &a.lp_mint.to_account_info(), &pool.lp_mint)?;
-    check_key("coin_vault", &a.coin_vault.to_account_info(), &pool.coin_vault)?;
-    check_key("pc_vault", &a.pc_vault.to_account_info(), &pool.pc_vault)?;
-    check_key("target_orders", &a.target_orders.to_account_info(), &pool.target_orders)?;
-    check_key("fee_account", &a.fee_account.to_account_info(), &pool.create_pool_fee_destination)?;
-    check_key("lp_account", &a.lp_account.to_account_info(), &abi::user_lp_ata(&authority, &pool.lp_mint))?;
+    let derived = [
+        ("amm_config", &a.amm_config, pool.config),
+        ("pool", &a.pool, pool.amm),
+        ("amm_authority", &a.amm_authority, pool.authority),
+        ("lp_mint", &a.lp_mint, pool.lp_mint),
+        ("coin_vault", &a.coin_vault, pool.coin_vault),
+        ("pc_vault", &a.pc_vault, pool.pc_vault),
+        ("target_orders", &a.target_orders, pool.target_orders),
+        ("fee_account", &a.fee_account, pool.create_pool_fee_destination),
+        ("lp_account", &a.lp_account, abi::user_lp_ata(&authority, &pool.lp_mint)),
+    ];
+    for (name, account, expected) in &derived {
+        check_key(name, account.as_ref(), expected)?;
+    }
     for (name, created) in [
         ("pool", &a.pool),
         ("lp_mint", &a.lp_mint),
@@ -392,7 +448,7 @@ fn check(a: &MigrateV4, req: &Req) -> Result<Checked> {
         ("target_orders", &a.target_orders),
         ("lp_account", &a.lp_account),
     ] {
-        check_empty(name, &created.to_account_info())?;
+        check_empty(name, created.as_ref())?;
     }
     abi::validate_mints(&abi::Initialize2Accounts {
         coin_mint: abi::MintKey { key: req.mint, owner: *a.mint.to_account_info().owner },
@@ -405,16 +461,25 @@ fn check(a: &MigrateV4, req: &Req) -> Result<Checked> {
     })
     .map_err(|_| error!(BeamError::UnsupportedMint))?;
     check_decimals(a.mint.decimals)?;
+    Ok(pool)
+}
 
-    let pool_fee = abi::validate_create_pool_fee_account(&AMM_V4_PROGRAM, &a.amm_config.to_account_info(), req.max_pool_fee).map_err(|e| match e {
+/// The create-pool fee Raydium charges now, and the exact setup cost; the budget must fit between best and worst case.
+fn check_funding(a: &MigrateV4, req: &Req) -> Result<(u64, u64)> {
+    let pool_fee = abi::validate_create_pool_fee_account(&AMM_V4_PROGRAM, a.amm_config.as_ref(), req.max_pool_fee).map_err(|e| match e {
         abi::AmmV4AbiError::CreatePoolFeeExceedsCap => error!(BeamError::CreatePoolFeeExceedsCap),
         _ => error!(BeamError::InvalidRaydiumAccount),
     })?;
     let setup = setup_cost(pool_fee, &a.rent)?;
     let worst_case = setup_cost(req.max_pool_fee, &a.rent)?;
     require!(req.budget >= setup && req.budget <= worst_case, BeamError::SetupFundingOutOfBounds);
+    Ok((pool_fee, setup))
+}
 
-    let amounts = plan(PlanInput {
+/// The migration amounts for the curve as it stands.
+fn curve_plan(a: &MigrateV4) -> Result<Plan> {
+    let curve_info = a.bonding_curve.to_account_info();
+    plan(PlanInput {
         vault_tokens: a.curve_vault.amount,
         supply: a.bonding_curve.token_total_supply,
         real_quote: a.bonding_curve.real_quote_reserves,
@@ -425,8 +490,7 @@ fn check(a: &MigrateV4, req: &Req) -> Result<Checked> {
         creator_fee: a.bonding_curve.creator_fee,
         protocol_fees: a.bonding_curve.protocol_fees,
         decimals: a.mint.decimals,
-    })?;
-    Ok(Checked { pool, pool_fee, setup, plan: amounts })
+    })
 }
 
 /// Records the migration authority's balances so donations are kept, and checks its token accounts are clean.
@@ -438,7 +502,7 @@ fn snapshot(a: &MigrateV4, req: &Req, pool_fee: u64) -> Result<Before> {
     let coin = unpack(&a.coin_source.to_account_info())?;
     check_source(&coin, &req.mint, &authority, false)?;
     let pc_reserve = pc.is_native.ok_or(BeamError::InvalidMigrationBalance)?;
-    let fee_account = if pool_fee > 0 { unpack(&a.fee_account.to_account_info())?.amount } else { 0 };
+    let fee_account = if pool_fee > 0 { unpack(a.fee_account.as_ref())?.amount } else { 0 };
     Ok(Before {
         lamports: a.migrator.lamports(),
         coin: coin.amount,
@@ -447,172 +511,161 @@ fn snapshot(a: &MigrateV4, req: &Req, pool_fee: u64) -> Result<Before> {
     })
 }
 
-/// Moves the setup money, tokens and SOL to the migration authority and syncs the wrapped SOL.
-fn fund(a: &MigrateV4, c: &Checked, before: &Before, req: &Req) -> Result<()> {
-    let curve_info = a.bonding_curve.to_account_info();
-    let pc_info = a.pc_source.to_account_info();
-    let curve_bump = [req.curve_bump];
-    let curve_seeds: &[&[u8]] = &[b"bonding-curve", req.mint.as_ref(), &curve_bump];
+impl Migration<'_, '_> {
+    /// Moves the setup money, tokens and SOL to the migration authority and syncs the wrapped SOL.
+    fn fund(&self) -> Result<()> {
+        let (a, req, c) = (self.a, &self.req, &self.c);
+        let curve_info = a.bonding_curve.to_account_info();
+        let pc_info = a.pc_source.to_account_info();
+        let curve_bump = [req.curve_bump];
+        let curve_seeds: &[&[u8]] = &[b"bonding-curve", req.mint.as_ref(), &curve_bump];
 
-    anchor_lang::system_program::transfer(
-        CpiContext::new(
-            a.system_program.to_account_info(),
-            anchor_lang::system_program::Transfer { from: a.user.to_account_info(), to: a.migrator.to_account_info() },
-        ),
-        req.budget,
-    )?;
-    token::transfer_checked(
-        CpiContext::new_with_signer(
-            a.token_program.to_account_info(),
-            TransferChecked { from: a.curve_vault.to_account_info(), mint: a.mint.to_account_info(), to: a.coin_source.to_account_info(), authority: curve_info.clone() },
-            &[curve_seeds],
-        ),
-        c.plan.coin_amount,
-        a.mint.decimals,
-    )?;
-    move_lamports(&curve_info, &pc_info, c.plan.pc_amount)?;
-    let mut sync = token::spl_token::instruction::sync_native(&token::ID, &pc_info.key())?;
-    sync.accounts.push(AccountMeta::new_readonly(a.rent.key(), false));
-    sync.accounts.push(AccountMeta::new(curve_info.key(), false));
-    invoke(&sync, &[pc_info.clone(), a.rent.to_account_info(), curve_info, a.token_program.to_account_info()])?;
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                a.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer { from: a.user.to_account_info(), to: a.migrator.to_account_info() },
+            ),
+            req.budget,
+        )?;
+        token::transfer_checked(
+            CpiContext::new_with_signer(
+                a.token_program.to_account_info(),
+                TransferChecked { from: a.curve_vault.to_account_info(), mint: a.mint.to_account_info(), to: a.coin_source.to_account_info(), authority: curve_info.clone() },
+                &[curve_seeds],
+            ),
+            c.plan.coin_amount,
+            a.mint.decimals,
+        )?;
+        move_lamports(&curve_info, &pc_info, c.plan.pc_amount)?;
+        let mut sync = token::spl_token::instruction::sync_native(&token::ID, &pc_info.key())?;
+        sync.accounts.push(AccountMeta::new_readonly(a.rent.key(), false));
+        sync.accounts.push(AccountMeta::new(curve_info.key(), false));
+        invoke(&sync, &[pc_info.clone(), a.rent.to_account_info(), curve_info, a.token_program.to_account_info()])?;
 
-    let pc_want = before.pc.checked_add(c.plan.pc_amount).ok_or(PumpError::Overflow)?;
-    ensure(unpack(&pc_info)?.amount == pc_want, BeamError::InvalidMigrationBalance, "wrapped SOL balance is wrong after funding")?;
-    let coin_want = before.coin.checked_add(c.plan.coin_amount).ok_or(PumpError::Overflow)?;
-    ensure(unpack(&a.coin_source.to_account_info())?.amount == coin_want, BeamError::InvalidMigrationBalance, "token balance is wrong after funding")?;
-    Ok(())
-}
+        let pc_want = self.before.pc.checked_add(c.plan.pc_amount).ok_or(PumpError::Overflow)?;
+        ensure(unpack(&pc_info)?.amount == pc_want, BeamError::InvalidMigrationBalance, "wrapped SOL balance is wrong after funding")?;
+        let coin_want = self.before.coin.checked_add(c.plan.coin_amount).ok_or(PumpError::Overflow)?;
+        ensure(unpack(&a.coin_source.to_account_info())?.amount == coin_want, BeamError::InvalidMigrationBalance, "token balance is wrong after funding")?;
+        Ok(())
+    }
 
-/// Calls Raydium's `Initialize2`, with the migration authority signing.
-fn create_pool(a: &MigrateV4, c: &Checked, req: &Req) -> Result<()> {
-    let bump = [req.auth_bump];
-    let seeds: &[&[u8]] = &[V4_AUTH_SEED, req.mint.as_ref(), &bump];
-    // (account, writable, signer) in Raydium's fixed 19-account order; slot 14 is the market seed, which is the mint.
-    // Kept on the heap: a 19-entry array of AccountInfo would overflow the 4 KB SBF stack frame.
-    let mut slots: Vec<(AccountInfo, bool, bool)> = Vec::with_capacity(abi::INITIALIZE2_ACCOUNT_COUNT);
-    slots.push((a.token_program.to_account_info(), false, false));
-    slots.push((a.associated_token_program.to_account_info(), false, false));
-    slots.push((a.system_program.to_account_info(), false, false));
-    slots.push((a.rent.to_account_info(), false, false));
-    slots.push((a.pool.to_account_info(), true, false));
-    slots.push((a.amm_authority.to_account_info(), false, false));
-    slots.push((a.lp_mint.to_account_info(), true, false));
-    slots.push((a.mint.to_account_info(), false, false));
-    slots.push((a.pc_mint.to_account_info(), false, false));
-    slots.push((a.coin_vault.to_account_info(), true, false));
-    slots.push((a.pc_vault.to_account_info(), true, false));
-    slots.push((a.target_orders.to_account_info(), true, false));
-    slots.push((a.amm_config.to_account_info(), false, false));
-    slots.push((a.fee_account.to_account_info(), true, false));
-    slots.push((a.mint.to_account_info(), false, false));
-    slots.push((a.migrator.to_account_info(), true, true));
-    slots.push((a.coin_source.to_account_info(), true, false));
-    slots.push((a.pc_source.to_account_info(), true, false));
-    slots.push((a.lp_account.to_account_info(), true, false));
-    let keys = slots.iter().enumerate().filter(|(slot, _)| *slot != MARKET_SEED_SLOT).map(|(_, (info, ..))| info.key);
-    ensure(distinct(keys), BeamError::InvalidRaydiumAccount, "Initialize2 accounts must be distinct")?;
+    /// Calls Raydium's `Initialize2`, with the migration authority signing.
+    fn create_pool(&self) -> Result<()> {
+        let (a, req, c) = (self.a, &self.req, &self.c);
+        let bump = [req.auth_bump];
+        let seeds: &[&[u8]] = &[V4_AUTH_SEED, req.mint.as_ref(), &bump];
+        let infos = initialize2_infos(a);
+        let pool_accounts = &infos[..abi::INITIALIZE2_ACCOUNT_COUNT];
+        let keys = pool_accounts.iter().enumerate().filter(|(slot, _)| *slot != MARKET_SEED_SLOT).map(|(_, info)| info.key);
+        ensure(distinct(keys), BeamError::InvalidRaydiumAccount, "Initialize2 accounts must be distinct")?;
 
-    let ix = Instruction {
-        program_id: AMM_V4_PROGRAM,
-        accounts: slots.iter().map(|(info, writable, signer)| AccountMeta { pubkey: *info.key, is_signer: *signer, is_writable: *writable }).collect(),
-        data: abi::encode_initialize2(
-            c.pool.nonce,
-            abi::Initialize2Args { open_time: req.open_time, init_pc_amount: c.plan.pc_amount, init_coin_amount: c.plan.coin_amount },
-        )
-        .to_vec(),
-    };
-    let mut infos: Vec<AccountInfo> = Vec::with_capacity(slots.len().saturating_add(1));
-    infos.extend(slots.iter().map(|(info, ..)| info.clone()));
-    infos.push(a.amm_program.to_account_info());
-    invoke_signed(&ix, &infos, &[seeds])?;
-    Ok(())
-}
+        let ix = Instruction {
+            program_id: AMM_V4_PROGRAM,
+            accounts: pool_accounts
+                .iter()
+                .zip(INITIALIZE2_ACCESS)
+                .map(|(info, access)| AccountMeta { pubkey: *info.key, is_signer: access == Access::Sign, is_writable: access != Access::Read })
+                .collect(),
+            data: abi::encode_initialize2(
+                c.pool.nonce,
+                abi::Initialize2Args { open_time: req.open_time, init_pc_amount: c.plan.pc_amount, init_coin_amount: c.plan.coin_amount },
+            )
+            .to_vec(),
+        };
+        invoke_signed(&ix, &infos, &[seeds])?;
+        Ok(())
+    }
 
-/// Re-reads what Raydium created and requires it to match the plan exactly.
-fn verify(a: &MigrateV4, c: &Checked, before: &Before, req: &Req) -> Result<()> {
-    let bad = BeamError::InvalidMigrationResult;
-    let pool_info = a.pool.to_account_info();
-    require_keys_eq!(*pool_info.owner, AMM_V4_PROGRAM, BeamError::InvalidMigrationResult);
-    let expected = AmmInfo {
-        nonce: u64::from(c.pool.nonce),
-        coin_decimals: u64::from(a.mint.decimals),
-        pc_decimals: u64::from(a.pc_mint.decimals),
-        pool_open_time: req.open_time,
-        coin_vault: c.pool.coin_vault,
-        pc_vault: c.pool.pc_vault,
-        coin_mint: req.mint,
-        pc_mint: a.pc_mint.key(),
-        lp_mint: c.pool.lp_mint,
-        market: req.mint,
-        target_orders: c.pool.target_orders,
-        lp_amount: c.plan.user_lp.checked_add(c.plan.locked_lp).ok_or(PumpError::Overflow)?,
-        ..AmmInfo::FRESH
-    };
-    AmmInfo::parse(&pool_info.try_borrow_data()?)?.check(&expected)?;
-    let orders = a.target_orders.to_account_info();
-    ensure(*orders.owner == AMM_V4_PROGRAM && orders.data_len() == TARGET_ORDERS_LEN, bad, "target orders account has the wrong owner or size")?;
-    for (name, vault, mint, amount) in [("coin_vault", &a.coin_vault, req.mint, c.plan.coin_amount), ("pc_vault", &a.pc_vault, a.pc_mint.key(), c.plan.pc_amount)] {
-        let state = unpack(&vault.to_account_info())?;
-        if state.owner != c.pool.authority || state.mint != mint || state.amount != amount {
-            msg!("amm v4: `{}` does not hold the planned amount", name);
-            return err!(BeamError::InvalidMigrationResult);
+    /// Re-reads what Raydium created and requires it to match the plan exactly.
+    fn verify(&self) -> Result<()> {
+        let (a, req, c, before) = (self.a, &self.req, &self.c, &self.before);
+        let bad = BeamError::InvalidMigrationResult;
+        let pool_info = a.pool.to_account_info();
+        require_keys_eq!(*pool_info.owner, AMM_V4_PROGRAM, BeamError::InvalidMigrationResult);
+        let expected = AmmInfo {
+            nonce: u64::from(c.pool.nonce),
+            coin_decimals: u64::from(a.mint.decimals),
+            pc_decimals: u64::from(a.pc_mint.decimals),
+            pool_open_time: req.open_time,
+            coin_vault: c.pool.coin_vault,
+            pc_vault: c.pool.pc_vault,
+            coin_mint: req.mint,
+            pc_mint: a.pc_mint.key(),
+            lp_mint: c.pool.lp_mint,
+            market: req.mint,
+            target_orders: c.pool.target_orders,
+            lp_amount: c.plan.user_lp.checked_add(c.plan.locked_lp).ok_or(PumpError::Overflow)?,
+            ..AmmInfo::FRESH
+        };
+        AmmInfo::parse(&pool_info.try_borrow_data()?)?.check(&expected)?;
+        let orders = a.target_orders.to_account_info();
+        ensure(*orders.owner == AMM_V4_PROGRAM && orders.data_len() == TARGET_ORDERS_LEN, bad, "target orders account has the wrong owner or size")?;
+        for (name, vault, mint, amount) in [("coin_vault", &a.coin_vault, req.mint, c.plan.coin_amount), ("pc_vault", &a.pc_vault, a.pc_mint.key(), c.plan.pc_amount)] {
+            let state = unpack(vault.as_ref())?;
+            if state.owner != c.pool.authority || state.mint != mint || state.amount != amount {
+                msg!("amm v4: `{}` does not hold the planned amount", name);
+                return err!(BeamError::InvalidMigrationResult);
+            }
         }
+        ensure(unpack(&a.coin_source.to_account_info())?.amount == before.coin, bad, "the token source was not emptied exactly")?;
+        ensure(unpack(&a.pc_source.to_account_info())?.amount == before.pc, bad, "the wrapped SOL source was not emptied exactly")?;
+        require_keys_eq!(*a.lp_mint.owner, token::ID, BeamError::InvalidMigrationResult);
+        let lp_mint = token::spl_token::state::Mint::unpack(&a.lp_mint.try_borrow_data()?)?;
+        ensure(lp_mint.supply == c.plan.user_lp && lp_mint.mint_authority == Some(c.pool.authority).into(), bad, "LP mint supply or authority is wrong")?;
+        let lp = unpack(a.lp_account.as_ref())?;
+        ensure(lp.mint == c.pool.lp_mint && lp.owner == a.migrator.key() && lp.amount == c.plan.user_lp, bad, "LP account does not hold the planned LP")?;
+        if c.pool_fee > 0 {
+            let fee_want = before.fee_account.checked_add(c.pool_fee).ok_or(PumpError::Overflow)?;
+            ensure(unpack(a.fee_account.as_ref())?.amount == fee_want, bad, "the create-pool fee was not paid exactly")?;
+        }
+        let charged = before.lamports.checked_add(req.budget).and_then(|funded| funded.checked_sub(a.migrator.lamports())).ok_or(bad)?;
+        ensure(charged == c.setup, bad, "setup lamports spent differ from the exact setup cost")?;
+        Ok(())
     }
-    ensure(unpack(&a.coin_source.to_account_info())?.amount == before.coin, bad, "the token source was not emptied exactly")?;
-    ensure(unpack(&a.pc_source.to_account_info())?.amount == before.pc, bad, "the wrapped SOL source was not emptied exactly")?;
-    require_keys_eq!(*a.lp_mint.owner, token::ID, BeamError::InvalidMigrationResult);
-    let lp_mint = token::spl_token::state::Mint::unpack(&a.lp_mint.try_borrow_data()?)?;
-    ensure(lp_mint.supply == c.plan.user_lp && lp_mint.mint_authority == Some(c.pool.authority).into(), bad, "LP mint supply or authority is wrong")?;
-    let lp = unpack(&a.lp_account.to_account_info())?;
-    ensure(lp.mint == c.pool.lp_mint && lp.owner == a.migrator.key() && lp.amount == c.plan.user_lp, bad, "LP account does not hold the planned LP")?;
-    if c.pool_fee > 0 {
-        let fee_want = before.fee_account.checked_add(c.pool_fee).ok_or(PumpError::Overflow)?;
-        ensure(unpack(&a.fee_account.to_account_info())?.amount == fee_want, bad, "the create-pool fee was not paid exactly")?;
+
+    /// Burns exactly the LP Raydium issued to the migration authority; a failure rolls the whole migration back.
+    fn burn_lp(&self) -> Result<()> {
+        let (a, req, c) = (self.a, &self.req, &self.c);
+        let bump = [req.auth_bump];
+        let seeds: &[&[u8]] = &[V4_AUTH_SEED, req.mint.as_ref(), &bump];
+        token::burn(
+            CpiContext::new_with_signer(
+                a.token_program.to_account_info(),
+                Burn { mint: a.lp_mint.to_account_info(), from: a.lp_account.to_account_info(), authority: a.migrator.to_account_info() },
+                &[seeds],
+            ),
+            c.plan.user_lp,
+        )?;
+        let lp_mint = token::spl_token::state::Mint::unpack(&a.lp_mint.try_borrow_data()?)?;
+        let lp = unpack(a.lp_account.as_ref())?;
+        ensure(lp_mint.supply == 0 && lp.amount == 0, BeamError::InvalidMigrationResult, "LP was not burned in full")
     }
-    let charged = before.lamports.checked_add(req.budget).and_then(|funded| funded.checked_sub(a.migrator.lamports())).ok_or(bad)?;
-    ensure(charged == c.setup, bad, "setup lamports spent differ from the exact setup cost")?;
-    Ok(())
-}
 
-/// Burns exactly the LP Raydium issued to the migration authority; a failure rolls the whole migration back.
-fn burn_lp(a: &MigrateV4, c: &Checked, req: &Req) -> Result<()> {
-    let bump = [req.auth_bump];
-    let seeds: &[&[u8]] = &[V4_AUTH_SEED, req.mint.as_ref(), &bump];
-    token::burn(
-        CpiContext::new_with_signer(
-            a.token_program.to_account_info(),
-            Burn { mint: a.lp_mint.to_account_info(), from: a.lp_account.to_account_info(), authority: a.migrator.to_account_info() },
-            &[seeds],
-        ),
-        c.plan.user_lp,
-    )?;
-    let lp_mint = token::spl_token::state::Mint::unpack(&a.lp_mint.try_borrow_data()?)?;
-    let lp = unpack(&a.lp_account.to_account_info())?;
-    ensure(lp_mint.supply == 0 && lp.amount == 0, BeamError::InvalidMigrationResult, "LP was not burned in full")
-}
-
-/// Returns the unspent setup money to the caller.
-fn refund(a: &MigrateV4, req: &Req, amount: u64) -> Result<()> {
-    if amount == 0 {
-        return Ok(());
+    /// Returns the unspent setup money to the caller.
+    fn refund(&self) -> Result<()> {
+        let (a, req) = (self.a, &self.req);
+        let amount = req.budget.checked_sub(self.c.setup).ok_or(BeamError::SetupFundingOutOfBounds)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let bump = [req.auth_bump];
+        let seeds: &[&[u8]] = &[V4_AUTH_SEED, req.mint.as_ref(), &bump];
+        anchor_lang::system_program::transfer(
+            CpiContext::new_with_signer(
+                a.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer { from: a.migrator.to_account_info(), to: a.user.to_account_info() },
+                &[seeds],
+            ),
+            amount,
+        )
     }
-    let bump = [req.auth_bump];
-    let seeds: &[&[u8]] = &[V4_AUTH_SEED, req.mint.as_ref(), &bump];
-    anchor_lang::system_program::transfer(
-        CpiContext::new_with_signer(
-            a.system_program.to_account_info(),
-            anchor_lang::system_program::Transfer { from: a.migrator.to_account_info(), to: a.user.to_account_info() },
-            &[seeds],
-        ),
-        amount,
-    )
-}
 
-/// Pays the inherited migration fee after the last CPI, then checks the curve keeps its floor.
-fn pay_fee(a: &MigrateV4, c: &Checked) -> Result<()> {
-    let curve_info = a.bonding_curve.to_account_info();
-    move_lamports(&curve_info, &a.withdraw_authority.to_account_info(), c.plan.migration_fee)?;
-    ensure(curve_info.lamports() >= c.plan.floor, BeamError::InvalidMigrationBalance, "the curve fell below its protected floor")
+    /// Pays the inherited migration fee after the last CPI, then checks the curve keeps its floor.
+    fn pay_fee(&self) -> Result<()> {
+        let curve_info = self.a.bonding_curve.to_account_info();
+        move_lamports(&curve_info, self.a.withdraw_authority.as_ref(), self.c.plan.migration_fee)?;
+        ensure(curve_info.lamports() >= self.c.plan.floor, BeamError::InvalidMigrationBalance, "the curve fell below its protected floor")
+    }
 }
 
 /// Writes the rights record and receipt, zeroes the curve's reserves and emits the event.
@@ -656,20 +709,21 @@ fn record(a: &mut MigrateV4, c: &Checked, req: &Req) {
     });
 }
 
-/// Entry point: runs the steps above in order, and any failure rolls everything back.
+/// Entry point: runs the steps in order, and any failure rolls everything back.
 pub fn migrate_v4(ctx: Context<MigrateV4>, open_time: u64, max_pool_fee: u64, budget: u64) -> Result<()> {
     let req = Req { mint: ctx.accounts.mint.key(), open_time, max_pool_fee, budget, curve_bump: ctx.bumps.bonding_curve, auth_bump: ctx.bumps.migrator };
     let c = check(ctx.accounts, &req)?;
     let before = snapshot(ctx.accounts, &req, c.pool_fee)?;
 
-    fund(ctx.accounts, &c, &before, &req)?;
-    create_pool(ctx.accounts, &c, &req)?;
-    verify(ctx.accounts, &c, &before, &req)?;
-    burn_lp(ctx.accounts, &c, &req)?;
+    let step = Migration { a: &*ctx.accounts, req, c, before };
+    step.fund()?;
+    step.create_pool()?;
+    step.verify()?;
+    step.burn_lp()?;
+    step.refund()?;
+    step.pay_fee()?;
 
-    let unspent = budget.checked_sub(c.setup).ok_or(BeamError::SetupFundingOutOfBounds)?;
-    refund(ctx.accounts, &req, unspent)?;
-    pay_fee(ctx.accounts, &c)?;
+    let Migration { req, c, .. } = step;
     record(&mut *ctx.accounts, &c, &req);
     Ok(())
 }
@@ -776,6 +830,32 @@ mod tests {
             assert!(check_source(&bad, &mint, &owner, false).is_err());
         }
         assert!(check_source(&good, &mint, &owner, true).is_err(), "a non-native account is not a WSOL source");
+        Ok(())
+    }
+
+    /// Our table of access flags must describe the same instruction as the ABI builder in `beam_amm_v4.rs`.
+    #[test]
+    fn the_access_table_matches_the_abi_builders_instruction() -> std::result::Result<(), abi::AmmV4AbiError> {
+        let (mint, wallet) = (Pubkey::new_unique(), Pubkey::new_unique());
+        let pool = abi::derive_pool_addresses(&AMM_V4_PROGRAM, &mint)?;
+        let accounts = abi::Initialize2Accounts {
+            coin_mint: abi::MintKey { key: mint, owner: abi::SPL_TOKEN_PROGRAM_ID },
+            pc_mint: abi::MintKey { key: token::spl_token::native_mint::ID, owner: abi::SPL_TOKEN_PROGRAM_ID },
+            market_seed: mint,
+            user_wallet: wallet,
+            user_coin_source: Pubkey::new_unique(),
+            user_pc_source: Pubkey::new_unique(),
+            user_lp_ata: abi::user_lp_ata(&wallet, &pool.lp_mint),
+        };
+        let args = abi::Initialize2Args { open_time: 7, init_pc_amount: 11, init_coin_amount: 13 };
+        let ix = abi::initialize2_instruction(AMM_V4_PROGRAM, &accounts, args)?;
+        assert_eq!(ix.accounts.len(), INITIALIZE2_ACCESS.len());
+        for (slot, (meta, access)) in ix.accounts.iter().zip(INITIALIZE2_ACCESS).enumerate() {
+            assert_eq!(meta.is_signer, access == Access::Sign, "signer flag of slot {slot}");
+            assert_eq!(meta.is_writable, access != Access::Read, "writable flag of slot {slot}");
+        }
+        assert_eq!(ix.accounts[MARKET_SEED_SLOT].pubkey, mint, "slot 14 is the market seed, which is the mint");
+        assert_eq!(ix.data, abi::encode_initialize2(pool.nonce, args).to_vec());
         Ok(())
     }
 }

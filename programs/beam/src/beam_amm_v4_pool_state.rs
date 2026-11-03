@@ -72,7 +72,7 @@ macro_rules! first_difference {
 }
 
 impl AmmInfo {
-    /// What every new pool must look like: swap-only, pinned fees, no pending PnL, no market.
+    /// What every new pool must look like: swap-only, pinned fees, no pending `PnL`, no market.
     pub const FRESH: Self = Self {
         status: STATUS_SWAP_ONLY,
         nonce: 0,
@@ -127,6 +127,7 @@ impl AmmInfo {
     }
 
     /// Name of the first field that differs from `expected`, or `None` when they are equal.
+    #[must_use]
     pub fn first_difference(&self, expected: &Self) -> Option<&'static str> {
         first_difference!(
             self,
