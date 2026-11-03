@@ -19,7 +19,10 @@
 //! Run with `cargo test --locked --features beam-sbf --test beam_migration`.
 #![cfg(feature = "beam-sbf")]
 
+mod common;
+
 use beam_amm_v4_validator::{derive_pool, expected_lp, pinned_config_bytes, process_raydium};
+use common::*;
 use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_program::program_pack::Pack;
@@ -34,21 +37,8 @@ const BEAM: Pubkey = pubkey!("GdaQ7RHbGKGEL5Px66tQP78S67XcgxYAzFUwja71qSJP");
 const SYSTEM: Pubkey = pubkey!("11111111111111111111111111111111");
 const UPGRADEABLE_LOADER: Pubkey = pubkey!("BPFLoaderUpgradeab1e11111111111111111111111");
 const CURVE_CREATOR: Pubkey = pubkey!("Stake11111111111111111111111111111111111111");
-/// `sha256("account:AmmV4Rights")[..8]`, the discriminator draft PR #49 reads.
-const DISC_RIGHTS: [u8; 8] = [88, 155, 79, 159, 221, 232, 159, 98];
 
-// Anchor discriminators: sha256("global:<ix>" or "account:<Type>")[..8].
-const DISC_CONFIGURE: [u8; 8] = [144, 16, 143, 164, 78, 235, 65, 59];
-const DISC_SET_ENABLED: [u8; 8] = [171, 118, 93, 180, 198, 99, 182, 159];
-const DISC_MIGRATE: [u8; 8] = [10, 219, 107, 168, 193, 191, 50, 99];
-const DISC_GLOBAL: [u8; 8] = [167, 232, 232, 177, 200, 108, 114, 127];
-const DISC_CURVE: [u8; 8] = [23, 183, 248, 55, 96, 216, 172, 96];
-const DISC_RECEIPT: [u8; 8] = [179, 123, 65, 124, 38, 208, 232, 159];
 
-// BeamError offset 7000.
-const ERR_NOT_ENABLED: u32 = 7002;
-const ERR_INVALID_ACCOUNT: u32 = 7003;
-const ERR_FEE_CAP: u32 = 7007;
 
 const DECIMALS: u8 = 6;
 const TOTAL_SUPPLY: u64 = 1_000_000_000_000_000;
@@ -64,13 +54,7 @@ const FEE_DEST_DONATION: u64 = 999;
 const AUTHORITY_DONATION: u64 = 1_000_000;
 const BASE_DONATION: u64 = 50;
 const WSOL_DONATION: u64 = 80;
-const ERR_SETUP_BOUNDS: u32 = 7008;
-const ERR_OPEN_TIME: u32 = 7009;
-const ERR_SOURCE: u32 = 7010;
-const ERR_UNSUPPORTED_MINT: u32 = 7005;
-const ERR_BALANCE: u32 = 7004;
 /// `PumpError::BondingCurveNotComplete`, offset 6000.
-const ERR_CURVE_NOT_COMPLETE: u32 = 6006;
 
 fn rent() -> Rent {
     Rent::default()
@@ -234,9 +218,9 @@ struct Fx {
     curve_vault: Pubkey,
     config: Pubkey,
     authority: Pubkey,
-    authority_base: Pubkey,
-    authority_wsol: Pubkey,
-    authority_lp: Pubkey,
+    coin_source: Pubkey,
+    pc_source: Pubkey,
+    lp_account: Pubkey,
     receipt: Pubkey,
     rights: Pubkey,
     ray: beam_amm_v4_validator::DerivedPool,
@@ -261,9 +245,9 @@ fn make_fx(opts: &Opts) -> Fx {
         curve_vault: spl_associated_token_account::get_associated_token_address(&curve, &mint),
         config: pda(&[b"beam-amm-v4-config"]),
         authority,
-        authority_base: spl_associated_token_account::get_associated_token_address(&authority, &mint),
-        authority_wsol: spl_associated_token_account::get_associated_token_address(&authority, &spl_token::native_mint::id()),
-        authority_lp: spl_associated_token_account::get_associated_token_address(&authority, &ray.lp_mint),
+        coin_source: spl_associated_token_account::get_associated_token_address(&authority, &mint),
+        pc_source: spl_associated_token_account::get_associated_token_address(&authority, &spl_token::native_mint::id()),
+        lp_account: spl_associated_token_account::get_associated_token_address(&authority, &ray.lp_mint),
         receipt: pda(&[b"beam-amm-v4-migration", mint.as_ref()]),
         rights: pda(&[b"beam-amm-rights", ray.amm.as_ref()]),
         ray,
@@ -342,8 +326,8 @@ fn fixture_accounts(opts: &Opts, fx: &Fx) -> Vec<(Pubkey, Account)> {
         out.push((fx.authority, sys(AUTHORITY_DONATION)));
         let base = token_account(&mint, &authority, BASE_DONATION, None);
         let wsol = token_account(&spl_token::native_mint::id(), &authority, WSOL_DONATION, Some(rent().minimum_balance(TokenAccount::LEN)));
-        out.push((fx.authority_base, if opts.frozen_base { frozen(base) } else { base }));
-        out.push((fx.authority_wsol, if opts.frozen_wsol { frozen(wsol) } else { wsol }));
+        out.push((fx.coin_source, if opts.frozen_base { frozen(base) } else { base }));
+        out.push((fx.pc_source, if opts.frozen_wsol { frozen(wsol) } else { wsol }));
     }
     if opts.precreate_pool {
         out.push((fx.ray.amm, sys(1)));
@@ -398,9 +382,9 @@ fn migrate_ix_at(fx: &Fx, user: &Pubkey, open_time: u64, max_fee: u64, budget: u
         meta(raydium_amm::id(), false, false),
         meta(fx.ray.config, false, false),
         meta(fx.authority, true, false),
-        meta(fx.authority_base, true, false),
+        meta(fx.coin_source, true, false),
         meta(wsol, false, false),
-        meta(fx.authority_wsol, true, false),
+        meta(fx.pc_source, true, false),
         meta(fx.ray.amm, true, false),
         meta(fx.ray.amm_authority, false, false),
         meta(fx.ray.lp_mint, true, false),
@@ -408,7 +392,7 @@ fn migrate_ix_at(fx: &Fx, user: &Pubkey, open_time: u64, max_fee: u64, budget: u
         meta(fx.ray.pc_vault, true, false),
         meta(fx.ray.target_orders, true, false),
         meta(fx.ray.fee_destination, true, false),
-        meta(fx.authority_lp, true, false),
+        meta(fx.lp_account, true, false),
         meta(fx.receipt, true, false),
         meta(fx.rights, true, false),
         meta(spl_token::id(), false, false),
@@ -462,7 +446,7 @@ fn amount(a: &Account) -> u64 {
 /// Every account a migration could touch, for exact rollback comparison.
 async fn snapshot<R: Reader>(ctx: &mut R, fx: &Fx) -> Vec<Option<Account>> {
     let keys = [
-        fx.curve, fx.curve_vault, fx.withdraw, fx.authority, fx.authority_base, fx.authority_wsol, fx.authority_lp, fx.receipt, fx.rights, fx.config,
+        fx.curve, fx.curve_vault, fx.withdraw, fx.authority, fx.coin_source, fx.pc_source, fx.lp_account, fx.receipt, fx.rights, fx.config,
         fx.ray.amm, fx.ray.lp_mint, fx.ray.coin_vault, fx.ray.pc_vault, fx.ray.target_orders, fx.ray.fee_destination, fx.mint,
     ];
     let mut out = Vec::new();
@@ -470,6 +454,23 @@ async fn snapshot<R: Reader>(ctx: &mut R, fx: &Fx) -> Vec<Option<Account>> {
         out.push(account(ctx, &key).await);
     }
     out
+}
+
+/// Sends `ixs`, expects the custom error `code` (any failure when `None`), and checks that no account moved.
+async fn refuses(ctx: &mut ProgramTestContext, fx: &Fx, ixs: &[Instruction], code: Option<u32>, what: &str) {
+    let before = snapshot(ctx, fx).await;
+    let result = send(ctx, ixs).await;
+    match code {
+        Some(code) => assert_custom(result, code),
+        None => assert_failed(result),
+    }
+    assert_eq!(snapshot(ctx, fx).await, before, "{what} must change nothing");
+}
+
+/// `refuses` for the standard migration call: the test payer, the stored fee cap, the exact setup budget.
+async fn refuses_standard(ctx: &mut ProgramTestContext, fx: &Fx, code: Option<u32>, what: &str) {
+    let ix = migrate_ix(fx, &ctx.payer.pubkey(), CREATE_FEE, budget());
+    refuses(ctx, fx, &[ix], code, what).await;
 }
 
 async fn enabled_context(opts: Opts, cap: u64) -> (ProgramTestContext, Fx) {
@@ -563,12 +564,12 @@ async fn assert_migrated<R: Reader>(ctx: &mut R, fx: &Fx, before: &[Option<Accou
     assert_eq!(amount(&must(ctx, &fx.ray.pc_vault).await), pc);
     assert_quote_ready(ctx, fx, VAULT_TOKENS, pc).await;
 
-    // Raydium issues LP to the migration PDA; Beam burns that entire issuance.
+    // LP is issued to the migration PDA and stays there: no burn, no transfer.
     let (_, user_lp) = expected_lp(VAULT_TOKENS, pc, DECIMALS).expect("the planned pool issues LP");
     let lp_mint = Mint::unpack(&must(ctx, &fx.ray.lp_mint).await.data).expect("LP mint data");
-    assert_eq!(lp_mint.supply, 0, "the minted LP supply was burned");
-    let lp = TokenAccount::unpack(&must(ctx, &fx.authority_lp).await.data).expect("LP account data");
-    assert_eq!((lp.owner, lp.mint, lp.amount), (fx.authority, fx.ray.lp_mint, 0));
+    assert_eq!(lp_mint.supply, user_lp);
+    let lp = TokenAccount::unpack(&must(ctx, &fx.lp_account).await.data).expect("LP account data");
+    assert_eq!((lp.owner, lp.mint, lp.amount), (fx.authority, fx.ray.lp_mint, user_lp));
 
     // Raydium's fee lands once; the curve keeps rent, fee claims and the surplus.
     assert_eq!(amount(&must(ctx, &fx.ray.fee_destination).await), FEE_DEST_DONATION + CREATE_FEE);
@@ -580,8 +581,8 @@ async fn assert_migrated<R: Reader>(ctx: &mut R, fx: &Fx, before: &[Option<Accou
 
     // Unrelated donations are neither adopted nor swept, and unspent setup is refunded.
     let (base_d, wsol_d, auth_d) = if fx.donations { (BASE_DONATION, WSOL_DONATION, AUTHORITY_DONATION) } else { (0, 0, 0) };
-    assert_eq!(amount(&must(ctx, &fx.authority_base).await), base_d);
-    let wsol = must(ctx, &fx.authority_wsol).await;
+    assert_eq!(amount(&must(ctx, &fx.coin_source).await), base_d);
+    let wsol = must(ctx, &fx.pc_source).await;
     assert_eq!(amount(&wsol), wsol_d);
     assert_eq!(wsol.lamports, rent().minimum_balance(TokenAccount::LEN) + wsol_d);
     assert_eq!(lamports(&account(ctx, &fx.authority).await), auth_d);
@@ -600,7 +601,7 @@ async fn assert_migrated<R: Reader>(ctx: &mut R, fx: &Fx, before: &[Option<Accou
         + rent().minimum_balance(TokenAccount::LEN);
     let words: Vec<u64> = (0..7).map(|i| u64_at(&r.data, 104 + 8 * i)).collect();
     assert_eq!(words, vec![VAULT_TOKENS, pc, MIGRATION_FEE, CREATE_FEE, user_lp, spent, 0]);
-    assert_eq!(r.data[160], 1, "Beam burned all LP it received");
+    assert_eq!(r.data[160], 0, "LP disposition is unresolved");
     assert_rights_record(ctx, fx).await;
 }
 
@@ -622,9 +623,7 @@ async fn disabled_config_blocks_before_any_movement() {
     let mut ctx = start(pt, &fx).await;
     let payer = ctx.payer.pubkey();
     send(&mut ctx, &[configure_ix(&fx, &payer, CREATE_FEE)]).await.expect("the transaction succeeds");
-    let before = snapshot(&mut ctx, &fx).await;
-    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_NOT_ENABLED);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before);
+    refuses_standard(&mut ctx, &fx, Some(ERR_NOT_ENABLED), "a disabled config").await;
 }
 
 /// The binary a release would use has no `experimental-amm-v4`: the authority cannot
@@ -635,10 +634,8 @@ async fn production_build_cannot_enable_migration() {
     let mut ctx = start(pt, &fx).await;
     let payer = ctx.payer.pubkey();
     send(&mut ctx, &[configure_ix(&fx, &payer, CREATE_FEE)]).await.expect("the transaction succeeds");
-    let before = snapshot(&mut ctx, &fx).await;
-    assert_custom(send(&mut ctx, &[enable_ix(&fx, &payer, true)]).await, ERR_NOT_ENABLED);
-    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_NOT_ENABLED);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before, "a refused enable or migration must change nothing");
+    refuses(&mut ctx, &fx, &[enable_ix(&fx, &payer, true)], Some(ERR_NOT_ENABLED), "a refused enable").await;
+    refuses_standard(&mut ctx, &fx, Some(ERR_NOT_ENABLED), "a migration that was never enabled").await;
     // Turning it off is always allowed.
     send(&mut ctx, &[enable_ix(&fx, &payer, false)]).await.expect("the transaction succeeds");
 }
@@ -652,10 +649,7 @@ fn compute_limit(units: u32) -> Instruction {
 #[tokio::test]
 async fn an_incomplete_curve_is_refused_before_anything_moves() {
     let (mut ctx, fx) = enabled_context(Opts { curve_complete: false, ..Opts::standard() }, CREATE_FEE).await;
-    let payer = ctx.payer.pubkey();
-    let before = snapshot(&mut ctx, &fx).await;
-    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_CURVE_NOT_COMPLETE);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before, "an incomplete curve must change nothing");
+    refuses_standard(&mut ctx, &fx, Some(ERR_CURVE_NOT_COMPLETE), "an incomplete curve").await;
 }
 
 /// The curve must cover its rent, the creator and protocol fee claims, and the pool's quote. One
@@ -663,10 +657,7 @@ async fn an_incomplete_curve_is_refused_before_anything_moves() {
 #[tokio::test]
 async fn a_curve_one_lamport_short_of_its_liabilities_is_refused_and_an_exact_one_migrates() {
     let (mut ctx, fx) = enabled_context(Opts { curve_short_by: CURVE_SURPLUS + 1, ..Opts::standard() }, CREATE_FEE).await;
-    let payer = ctx.payer.pubkey();
-    let before = snapshot(&mut ctx, &fx).await;
-    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_BALANCE);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before, "a short curve must change nothing");
+    refuses_standard(&mut ctx, &fx, Some(ERR_BALANCE), "a short curve").await;
 
     let (mut ctx, fx) = enabled_context(Opts { curve_short_by: CURVE_SURPLUS, ..Opts::standard() }, CREATE_FEE).await;
     let payer = ctx.payer.pubkey();
@@ -679,10 +670,7 @@ async fn a_curve_one_lamport_short_of_its_liabilities_is_refused_and_an_exact_on
 async fn an_empty_or_oversized_curve_vault_is_refused() {
     for vault_tokens in [0, TOTAL_SUPPLY + 1] {
         let (mut ctx, fx) = enabled_context(Opts { vault_tokens, ..Opts::standard() }, CREATE_FEE).await;
-        let payer = ctx.payer.pubkey();
-        let before = snapshot(&mut ctx, &fx).await;
-        assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_BALANCE);
-        assert_eq!(snapshot(&mut ctx, &fx).await, before, "{vault_tokens} vault tokens must change nothing");
+        refuses_standard(&mut ctx, &fx, Some(ERR_BALANCE), &format!("{vault_tokens} vault tokens")).await;
     }
 }
 
@@ -692,10 +680,7 @@ async fn an_empty_or_oversized_curve_vault_is_refused() {
 async fn mint_with_too_many_decimals_is_refused_before_anything_moves() {
     for decimals in [19u8, 255] {
         let (mut ctx, fx) = enabled_context(Opts { mint_decimals: decimals, ..Opts::standard() }, CREATE_FEE).await;
-        let payer = ctx.payer.pubkey();
-        let before = snapshot(&mut ctx, &fx).await;
-        assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_UNSUPPORTED_MINT);
-        assert_eq!(snapshot(&mut ctx, &fx).await, before, "{decimals} decimals must change nothing");
+        refuses_standard(&mut ctx, &fx, Some(ERR_UNSUPPORTED_MINT), &format!("{decimals} decimals")).await;
     }
 }
 
@@ -704,10 +689,7 @@ async fn mint_with_too_many_decimals_is_refused_before_anything_moves() {
 async fn frozen_source_accounts_are_refused_before_anything_moves() {
     for opts in [Opts { frozen_base: true, ..Opts::standard() }, Opts { frozen_wsol: true, ..Opts::standard() }] {
         let (mut ctx, fx) = enabled_context(opts, CREATE_FEE).await;
-        let payer = ctx.payer.pubkey();
-        let before = snapshot(&mut ctx, &fx).await;
-        assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_SOURCE);
-        assert_eq!(snapshot(&mut ctx, &fx).await, before, "a frozen source must change nothing");
+        refuses_standard(&mut ctx, &fx, Some(ERR_SOURCE), "a frozen source").await;
     }
 }
 
@@ -765,9 +747,7 @@ async fn a_third_party_can_create_the_pool_first_and_beam_then_fails_closed() {
     assert_eq!(u64_at(&pool.data, 0), 6, "the outsider's pool is already trading");
 
     // Beam's migration now fails closed and leaves the curve, its tokens and every balance alone.
-    let before = snapshot(&mut ctx, &fx).await;
-    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &outsider, CREATE_FEE, budget())]).await, ERR_INVALID_ACCOUNT);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before, "a pre-empted migration must move nothing");
+    refuses_standard(&mut ctx, &fx, Some(ERR_INVALID_ACCOUNT), "a pre-empted migration").await;
     assert!(account(&mut ctx, &fx.receipt).await.is_none(), "no receipt is written for a pre-empted migration");
 }
 
@@ -777,12 +757,10 @@ async fn a_third_party_can_create_the_pool_first_and_beam_then_fails_closed() {
 async fn pool_cannot_be_scheduled_to_open_in_the_future() {
     let (mut ctx, fx) = enabled_context(Opts::standard(), CREATE_FEE).await;
     let payer = ctx.payer.pubkey();
-    let before = snapshot(&mut ctx, &fx).await;
     for open_time in [4_102_444_800u64, u64::MAX] {
         let ix = migrate_ix_at(&fx, &payer, open_time, CREATE_FEE, budget());
-        assert_custom(send(&mut ctx, &[ix]).await, ERR_OPEN_TIME);
+        refuses(&mut ctx, &fx, &[ix], Some(ERR_OPEN_TIME), "a future open time").await;
     }
-    assert_eq!(snapshot(&mut ctx, &fx).await, before, "a refused open time must change nothing");
     // The same migration with the open time left at zero still works.
     assert_migrates(&mut ctx, &fx).await;
 }
@@ -791,10 +769,7 @@ async fn pool_cannot_be_scheduled_to_open_in_the_future() {
 async fn replay_is_rejected_and_leaves_the_pool_untouched() {
     let (mut ctx, fx) = enabled_context(Opts::standard(), CREATE_FEE).await;
     assert_migrates(&mut ctx, &fx).await;
-    let before = snapshot(&mut ctx, &fx).await;
-    let payer = ctx.payer.pubkey();
-    assert_failed(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before);
+    refuses_standard(&mut ctx, &fx, None, "a replay").await;
 }
 
 #[tokio::test]
@@ -802,21 +777,16 @@ async fn create_pool_fee_must_fit_both_the_caller_and_the_stored_cap() {
     // Caller cap above the stored cap.
     let (mut ctx, fx) = enabled_context(Opts::standard(), CREATE_FEE).await;
     let payer = ctx.payer.pubkey();
-    let before = snapshot(&mut ctx, &fx).await;
-    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE + 1, budget())]).await, ERR_FEE_CAP);
+    refuses(&mut ctx, &fx, &[migrate_ix(&fx, &payer, CREATE_FEE + 1, budget())], Some(ERR_FEE_CAP), "a cap above the stored cap").await;
     // Raydium's current fee above a caller cap that is within the stored cap.
-    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE - 1, budget())]).await, ERR_FEE_CAP);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before);
+    refuses(&mut ctx, &fx, &[migrate_ix(&fx, &payer, CREATE_FEE - 1, budget())], Some(ERR_FEE_CAP), "a cap below Raydium's fee").await;
 }
 
 #[tokio::test]
 async fn token_2022_mint_fails_before_liquidity_moves() {
     let token_2022 = pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
     let (mut ctx, fx) = enabled_context(Opts { mint_owner: token_2022, ..Opts::standard() }, CREATE_FEE).await;
-    let payer = ctx.payer.pubkey();
-    let before = snapshot(&mut ctx, &fx).await;
-    assert_failed(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before);
+    refuses_standard(&mut ctx, &fx, None, "a Token-2022 mint").await;
 }
 
 /// A funded account at the deterministic pool address blocks migration safely.
@@ -825,17 +795,13 @@ async fn token_2022_mint_fails_before_liquidity_moves() {
 #[tokio::test]
 async fn precreated_pool_blocks_migration_without_moving_liquidity() {
     let (mut ctx, fx) = enabled_context(Opts { precreate_pool: true, ..Opts::standard() }, CREATE_FEE).await;
-    let payer = ctx.payer.pubkey();
-    let before = snapshot(&mut ctx, &fx).await;
-    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_INVALID_ACCOUNT);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before);
+    refuses_standard(&mut ctx, &fx, Some(ERR_INVALID_ACCOUNT), "a pre-created pool").await;
 }
 
 #[tokio::test]
 async fn substituted_accounts_are_rejected() {
     let (mut ctx, fx) = enabled_context(Opts::standard(), CREATE_FEE).await;
     let payer = ctx.payer.pubkey();
-    let before = snapshot(&mut ctx, &fx).await;
     // (account index, name, whether Beam's own check reports InvalidRaydiumAccount)
     for (index, name, beam_error) in [
         (7, "amm program", false),
@@ -853,17 +819,14 @@ async fn substituted_accounts_are_rejected() {
     ] {
         let mut ix = migrate_ix(&fx, &payer, CREATE_FEE, budget());
         ix.accounts[index].pubkey = Pubkey::new_unique();
-        let result = send(&mut ctx, &[ix]).await;
-        if name == "pool" {
-            // The rights record's address is derived from the pool, so Anchor's seeds check
-            // (ConstraintSeeds, 2006) rejects a substituted pool before Beam's own check runs.
-            assert_custom(result, 2006);
-        } else if beam_error {
-            assert_custom(result, ERR_INVALID_ACCOUNT);
-        } else {
-            assert_failed(result);
-        }
-        assert_eq!(snapshot(&mut ctx, &fx).await, before, "state changed after substituting {name}");
+        // The rights record's address is derived from the pool, so Anchor's seeds check
+        // (ConstraintSeeds, 2006) rejects a substituted pool before Beam's own check runs.
+        let code = match (name, beam_error) {
+            ("pool", _) => Some(2006),
+            (_, true) => Some(ERR_INVALID_ACCOUNT),
+            (_, false) => None,
+        };
+        refuses(&mut ctx, &fx, &[ix], code, &format!("substituting {name}")).await;
     }
 }
 
@@ -873,14 +836,11 @@ async fn substituted_accounts_are_rejected() {
 async fn setup_funding_must_sit_between_the_exact_cost_and_the_accepted_worst_case() {
     let (mut ctx, fx) = enabled_context(Opts::standard(), CREATE_FEE).await;
     let payer = ctx.payer.pubkey();
-    let before = snapshot(&mut ctx, &fx).await;
-    // The create fee alone, and one lamport short of the real cost.
-    for short in [CREATE_FEE + 1_000, budget() - 1] {
-        assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, short)]).await, ERR_SETUP_BOUNDS);
+    // The create fee alone, one lamport short of the real cost, and one lamport above the worst case
+    // for a caller cap equal to the current fee.
+    for funded in [CREATE_FEE + 1_000, budget() - 1, budget() + 1] {
+        refuses(&mut ctx, &fx, &[migrate_ix(&fx, &payer, CREATE_FEE, funded)], Some(ERR_SETUP_BOUNDS), &format!("{funded} lamports of setup")).await;
     }
-    // One lamport above the worst case for a caller cap equal to the current fee.
-    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget() + 1)]).await, ERR_SETUP_BOUNDS);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before);
 }
 
 /// A caller who allows a higher fee than Raydium charges is refunded the difference,
@@ -903,18 +863,16 @@ async fn funding_for_a_higher_fee_cap_is_refunded_to_the_exact_cost() {
     assert!(paid <= budget() + receipt_rent + 100_000, "refund missing: {paid} lamports left the payer");
 }
 
-/// The CPI and LP burn succeed, then a later instruction fails: pool, fee, LP
-/// issuance and burn, and curve transfers all roll back together.
+/// The CPI succeeds, then a later instruction fails: pool, fee, LP and curve
+/// transfers all roll back together.
 #[tokio::test]
 async fn failure_after_a_successful_migration_rolls_back_the_pool() {
     let (mut ctx, fx) = enabled_context(Opts::standard(), CREATE_FEE).await;
     let payer = ctx.payer.pubkey();
-    let before = snapshot(&mut ctx, &fx).await;
     let mut data = vec![2, 0, 0, 0];
     data.extend_from_slice(&u64::MAX.to_le_bytes());
     let overdraw = Instruction { program_id: SYSTEM, accounts: vec![meta(payer, true, true), meta(Pubkey::new_unique(), true, false)], data };
-    assert_failed(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget()), overdraw]).await);
-    assert_eq!(snapshot(&mut ctx, &fx).await, before);
+    refuses(&mut ctx, &fx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget()), overdraw], None, "a failure after a successful migration").await;
     assert!(account(&mut ctx, &fx.ray.amm).await.is_none(), "pool must not survive");
     assert!(account(&mut ctx, &fx.receipt).await.is_none(), "receipt must not survive");
 }

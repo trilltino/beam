@@ -1,130 +1,99 @@
-//! Strict decoder for the pinned Raydium AMM v4 `AmmInfo` account.
-//!
-//! Layout evidence: raydium-io/raydium-amm at 91739d8d9f5cf347e0ce14ebe4d2bb7069fb31b6,
-//! `state.rs::AmmInfo` (`#[repr(C, packed)]`, 752 bytes). The account is raw packed data with
-//! no Anchor discriminator, so it is read field by field at fixed offsets with bounds-checked
-//! slices, never by pointer cast. `tests/amm-v4-validator/tests/pool_layout.rs` pins every offset
-//! below to the struct, so a drifted offset fails a test rather than silently misreading a pool.
-//!
-//! This module only parses and compares. Whether the account is the right one (owner, address,
-//! and that it is not an alias of another account) is the caller's job.
+//! Bounds-checked decoder for the pinned 752-byte Raydium AMM v4 `AmmInfo`; `pool_layout.rs` pins every offset to the struct.
 use anchor_lang::prelude::*;
 
 use crate::beam_policy::BeamError;
 
-/// Size of the pinned packed `AmmInfo` account.
 pub const AMM_INFO_LEN: usize = 752;
-/// `AmmStatus::SwapOnly`: the pool trades and nothing is scheduled.
+pub const TARGET_ORDERS_LEN: usize = 2208;
 pub const STATUS_SWAP_ONLY: u64 = 6;
-/// Fees a fresh pool carries, in the order of the `Fees` struct:
-/// min-separate 5/10000, trade 25/10000, PnL 12/100, swap 25/10000.
 pub const PINNED_FEES: [u64; 8] = [5, 10_000, 25, 10_000, 12, 100, 25, 10_000];
 
-const STATUS: usize = 0;
-const NONCE: usize = 8;
-const COIN_DECIMALS: usize = 32;
-const PC_DECIMALS: usize = 40;
-const FEES: usize = 128;
-const NEED_TAKE_PNL_COIN: usize = 192;
-const NEED_TAKE_PNL_PC: usize = 200;
-const POOL_OPEN_TIME: usize = 224;
-const COIN_VAULT: usize = 336;
-const PC_VAULT: usize = 368;
-const COIN_MINT: usize = 400;
-const PC_MINT: usize = 432;
-const LP_MINT: usize = 464;
-const OPEN_ORDERS: usize = 496;
-const MARKET: usize = 528;
-const MARKET_PROGRAM: usize = 560;
-const TARGET_ORDERS: usize = 592;
-const LP_AMOUNT: usize = 720;
+mod offset {
+    pub const STATUS: usize = 0;
+    pub const NONCE: usize = 8;
+    pub const COIN_DECIMALS: usize = 32;
+    pub const PC_DECIMALS: usize = 40;
+    pub const FEES: usize = 128;
+    pub const NEED_TAKE_PNL_COIN: usize = 192;
+    pub const NEED_TAKE_PNL_PC: usize = 200;
+    pub const POOL_OPEN_TIME: usize = 224;
+    pub const COIN_VAULT: usize = 336;
+    pub const PC_VAULT: usize = 368;
+    pub const COIN_MINT: usize = 400;
+    pub const PC_MINT: usize = 432;
+    pub const LP_MINT: usize = 464;
+    pub const OPEN_ORDERS: usize = 496;
+    pub const MARKET: usize = 528;
+    pub const MARKET_PROGRAM: usize = 560;
+    pub const TARGET_ORDERS: usize = 592;
+    pub const LP_AMOUNT: usize = 720;
+}
 
-/// The `AmmInfo` fields Beam relies on, copied out of the packed account.
+/// The fields of Raydium's `AmmInfo` that a fresh Beam pool must match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PoolState {
-    /// `AmmStatus`; `6` is `SwapOnly`.
+pub struct AmmInfo {
     pub status: u64,
-    /// Bump of Raydium's authority PDA.
     pub nonce: u64,
-    /// Decimals of the coin (launch) mint.
     pub coin_decimals: u64,
-    /// Decimals of the pc (wrapped SOL) mint.
     pub pc_decimals: u64,
-    /// The eight `Fees` words.
     pub fees: [u64; 8],
-    /// Coin owed to Raydium's PnL owner and not yet withdrawn.
     pub need_take_pnl_coin: u64,
-    /// Pc owed to Raydium's PnL owner and not yet withdrawn.
     pub need_take_pnl_pc: u64,
-    /// Unix time before which the pool does not trade.
     pub pool_open_time: u64,
-    /// Coin vault.
     pub coin_vault: Pubkey,
-    /// Pc vault.
     pub pc_vault: Pubkey,
-    /// Coin mint.
     pub coin_mint: Pubkey,
-    /// Pc mint.
     pub pc_mint: Pubkey,
-    /// LP mint.
     pub lp_mint: Pubkey,
-    /// OpenBook open-orders account; unset for these pools.
     pub open_orders: Pubkey,
-    /// The key Raydium used as the pool's address seed.
     pub market: Pubkey,
-    /// OpenBook program; unset for these pools.
     pub market_program: Pubkey,
-    /// Target-orders account.
     pub target_orders: Pubkey,
-    /// Total LP the pool accounts for, including the permanently locked minimum.
     pub lp_amount: u64,
 }
 
-/// What a freshly migrated pool must contain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExpectedPool {
-    /// Authority bump from Beam's own derivation.
-    pub nonce: u8,
-    /// Decimals of the launch mint.
-    pub coin_decimals: u8,
-    /// Decimals of wrapped SOL.
-    pub pc_decimals: u8,
-    /// The `open_time` passed to `Initialize2`.
-    pub open_time: u64,
-    /// Coin vault address.
-    pub coin_vault: Pubkey,
-    /// Pc vault address.
-    pub pc_vault: Pubkey,
-    /// Launch mint.
-    pub coin_mint: Pubkey,
-    /// Wrapped SOL mint.
-    pub pc_mint: Pubkey,
-    /// LP mint address.
-    pub lp_mint: Pubkey,
-    /// Seed Raydium must have used for the pool address.
-    pub market_seed: Pubkey,
-    /// Target-orders address.
-    pub target_orders: Pubkey,
-    /// Total LP the pool must account for: the user's LP plus the locked minimum.
-    pub lp_amount: u64,
-}
-
-fn word(data: &[u8], at: usize) -> Option<u64> {
+fn u64_at(data: &[u8], at: usize) -> Option<u64> {
     let bytes: [u8; 8] = data.get(at..)?.get(..8)?.try_into().ok()?;
     Some(u64::from_le_bytes(bytes))
 }
 
-fn key(data: &[u8], at: usize) -> Option<Pubkey> {
+fn key_at(data: &[u8], at: usize) -> Option<Pubkey> {
     let bytes: [u8; 32] = data.get(at..)?.get(..32)?.try_into().ok()?;
     Some(Pubkey::new_from_array(bytes))
 }
 
-impl PoolState {
-    /// Reads the relevant fields from a pool account's data.
-    ///
-    /// # Errors
-    ///
-    /// Fails with `InvalidMigrationResult` unless `data` is exactly [`AMM_INFO_LEN`] bytes.
+/// Returns the name of the first listed field that differs, in the order given.
+macro_rules! first_difference {
+    ($left:expr, $right:expr, [$($field:ident),+ $(,)?]) => {
+        $(if $left.$field != $right.$field {
+            return Some(stringify!($field));
+        })+
+    };
+}
+
+impl AmmInfo {
+    /// What every new pool must look like: swap-only, pinned fees, no pending PnL, no market.
+    pub const FRESH: Self = Self {
+        status: STATUS_SWAP_ONLY,
+        nonce: 0,
+        coin_decimals: 0,
+        pc_decimals: 0,
+        fees: PINNED_FEES,
+        need_take_pnl_coin: 0,
+        need_take_pnl_pc: 0,
+        pool_open_time: 0,
+        coin_vault: Pubkey::new_from_array([0; 32]),
+        pc_vault: Pubkey::new_from_array([0; 32]),
+        coin_mint: Pubkey::new_from_array([0; 32]),
+        pc_mint: Pubkey::new_from_array([0; 32]),
+        lp_mint: Pubkey::new_from_array([0; 32]),
+        open_orders: Pubkey::new_from_array([0; 32]),
+        market: Pubkey::new_from_array([0; 32]),
+        market_program: Pubkey::new_from_array([0; 32]),
+        target_orders: Pubkey::new_from_array([0; 32]),
+        lp_amount: 0,
+    };
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         require!(data.len() == AMM_INFO_LEN, BeamError::InvalidMigrationResult);
         Self::read(data).ok_or_else(|| error!(BeamError::InvalidMigrationResult))
@@ -133,58 +102,68 @@ impl PoolState {
     fn read(data: &[u8]) -> Option<Self> {
         let mut fees = [0u64; 8];
         for (index, slot) in fees.iter_mut().enumerate() {
-            *slot = word(data, FEES.checked_add(index.checked_mul(8)?)?)?;
+            *slot = u64_at(data, offset::FEES.checked_add(index.checked_mul(8)?)?)?;
         }
         Some(Self {
-            status: word(data, STATUS)?,
-            nonce: word(data, NONCE)?,
-            coin_decimals: word(data, COIN_DECIMALS)?,
-            pc_decimals: word(data, PC_DECIMALS)?,
+            status: u64_at(data, offset::STATUS)?,
+            nonce: u64_at(data, offset::NONCE)?,
+            coin_decimals: u64_at(data, offset::COIN_DECIMALS)?,
+            pc_decimals: u64_at(data, offset::PC_DECIMALS)?,
             fees,
-            need_take_pnl_coin: word(data, NEED_TAKE_PNL_COIN)?,
-            need_take_pnl_pc: word(data, NEED_TAKE_PNL_PC)?,
-            pool_open_time: word(data, POOL_OPEN_TIME)?,
-            coin_vault: key(data, COIN_VAULT)?,
-            pc_vault: key(data, PC_VAULT)?,
-            coin_mint: key(data, COIN_MINT)?,
-            pc_mint: key(data, PC_MINT)?,
-            lp_mint: key(data, LP_MINT)?,
-            open_orders: key(data, OPEN_ORDERS)?,
-            market: key(data, MARKET)?,
-            market_program: key(data, MARKET_PROGRAM)?,
-            target_orders: key(data, TARGET_ORDERS)?,
-            lp_amount: word(data, LP_AMOUNT)?,
+            need_take_pnl_coin: u64_at(data, offset::NEED_TAKE_PNL_COIN)?,
+            need_take_pnl_pc: u64_at(data, offset::NEED_TAKE_PNL_PC)?,
+            pool_open_time: u64_at(data, offset::POOL_OPEN_TIME)?,
+            coin_vault: key_at(data, offset::COIN_VAULT)?,
+            pc_vault: key_at(data, offset::PC_VAULT)?,
+            coin_mint: key_at(data, offset::COIN_MINT)?,
+            pc_mint: key_at(data, offset::PC_MINT)?,
+            lp_mint: key_at(data, offset::LP_MINT)?,
+            open_orders: key_at(data, offset::OPEN_ORDERS)?,
+            market: key_at(data, offset::MARKET)?,
+            market_program: key_at(data, offset::MARKET_PROGRAM)?,
+            target_orders: key_at(data, offset::TARGET_ORDERS)?,
+            lp_amount: u64_at(data, offset::LP_AMOUNT)?,
         })
     }
 
-    /// Compares every field Beam depends on with what the migration planned.
-    ///
-    /// # Errors
-    ///
-    /// Fails with `InvalidMigrationResult` on the first field that differs: a pool that is not
-    /// `SwapOnly`, has the wrong authority bump, decimals, fees, open time, vaults, mints, LP
-    /// mint, seed, target orders or LP total, has any OpenBook link, or already owes PnL.
-    pub fn verify(&self, expected: &ExpectedPool) -> Result<()> {
-        let matches = self.status == STATUS_SWAP_ONLY
-            && self.nonce == u64::from(expected.nonce)
-            && self.coin_decimals == u64::from(expected.coin_decimals)
-            && self.pc_decimals == u64::from(expected.pc_decimals)
-            && self.fees == PINNED_FEES
-            && self.need_take_pnl_coin == 0
-            && self.need_take_pnl_pc == 0
-            && self.pool_open_time == expected.open_time
-            && self.coin_vault == expected.coin_vault
-            && self.pc_vault == expected.pc_vault
-            && self.coin_mint == expected.coin_mint
-            && self.pc_mint == expected.pc_mint
-            && self.lp_mint == expected.lp_mint
-            && self.open_orders == Pubkey::default()
-            && self.market == expected.market_seed
-            && self.market_program == Pubkey::default()
-            && self.target_orders == expected.target_orders
-            && self.lp_amount == expected.lp_amount;
-        require!(matches, BeamError::InvalidMigrationResult);
-        Ok(())
+    /// Name of the first field that differs from `expected`, or `None` when they are equal.
+    pub fn first_difference(&self, expected: &Self) -> Option<&'static str> {
+        first_difference!(
+            self,
+            expected,
+            [
+                status,
+                nonce,
+                coin_decimals,
+                pc_decimals,
+                fees,
+                need_take_pnl_coin,
+                need_take_pnl_pc,
+                pool_open_time,
+                coin_vault,
+                pc_vault,
+                coin_mint,
+                pc_mint,
+                lp_mint,
+                open_orders,
+                market,
+                market_program,
+                target_orders,
+                lp_amount,
+            ]
+        );
+        None
+    }
+
+    /// Fails, logging the field, unless every field equals `expected`.
+    pub fn check(&self, expected: &Self) -> Result<()> {
+        match self.first_difference(expected) {
+            None => Ok(()),
+            Some(field) => {
+                msg!("amm v4: pool field `{}` differs from the plan", field);
+                err!(BeamError::InvalidMigrationResult)
+            }
+        }
     }
 }
 
@@ -192,7 +171,7 @@ impl PoolState {
 mod tests {
     use super::*;
 
-    fn put_word(data: &mut [u8], at: usize, value: u64) {
+    fn put_u64(data: &mut [u8], at: usize, value: u64) {
         data[at..at + 8].copy_from_slice(&value.to_le_bytes());
     }
 
@@ -200,101 +179,104 @@ mod tests {
         data[at..at + 32].copy_from_slice(value.as_ref());
     }
 
-    fn expected() -> ExpectedPool {
-        ExpectedPool {
+    fn sample() -> AmmInfo {
+        AmmInfo {
             nonce: 254,
             coin_decimals: 6,
             pc_decimals: 9,
-            open_time: 0,
             coin_vault: Pubkey::new_unique(),
             pc_vault: Pubkey::new_unique(),
             coin_mint: Pubkey::new_unique(),
             pc_mint: Pubkey::new_unique(),
             lp_mint: Pubkey::new_unique(),
-            market_seed: Pubkey::new_unique(),
+            market: Pubkey::new_unique(),
             target_orders: Pubkey::new_unique(),
             lp_amount: 1_000_000_000,
+            ..AmmInfo::FRESH
         }
     }
 
-    fn pool_bytes(e: &ExpectedPool) -> Vec<u8> {
+    fn to_bytes(info: &AmmInfo) -> Vec<u8> {
         let mut d = vec![0u8; AMM_INFO_LEN];
-        put_word(&mut d, STATUS, STATUS_SWAP_ONLY);
-        put_word(&mut d, NONCE, u64::from(e.nonce));
-        put_word(&mut d, COIN_DECIMALS, u64::from(e.coin_decimals));
-        put_word(&mut d, PC_DECIMALS, u64::from(e.pc_decimals));
-        for (i, fee) in PINNED_FEES.iter().enumerate() {
-            put_word(&mut d, FEES + i * 8, *fee);
+        put_u64(&mut d, offset::STATUS, info.status);
+        put_u64(&mut d, offset::NONCE, info.nonce);
+        put_u64(&mut d, offset::COIN_DECIMALS, info.coin_decimals);
+        put_u64(&mut d, offset::PC_DECIMALS, info.pc_decimals);
+        for (i, fee) in info.fees.iter().enumerate() {
+            put_u64(&mut d, offset::FEES + i * 8, *fee);
         }
-        put_word(&mut d, POOL_OPEN_TIME, e.open_time);
-        put_key(&mut d, COIN_VAULT, &e.coin_vault);
-        put_key(&mut d, PC_VAULT, &e.pc_vault);
-        put_key(&mut d, COIN_MINT, &e.coin_mint);
-        put_key(&mut d, PC_MINT, &e.pc_mint);
-        put_key(&mut d, LP_MINT, &e.lp_mint);
-        put_key(&mut d, MARKET, &e.market_seed);
-        put_key(&mut d, TARGET_ORDERS, &e.target_orders);
-        put_word(&mut d, LP_AMOUNT, e.lp_amount);
+        put_u64(&mut d, offset::NEED_TAKE_PNL_COIN, info.need_take_pnl_coin);
+        put_u64(&mut d, offset::NEED_TAKE_PNL_PC, info.need_take_pnl_pc);
+        put_u64(&mut d, offset::POOL_OPEN_TIME, info.pool_open_time);
+        put_key(&mut d, offset::COIN_VAULT, &info.coin_vault);
+        put_key(&mut d, offset::PC_VAULT, &info.pc_vault);
+        put_key(&mut d, offset::COIN_MINT, &info.coin_mint);
+        put_key(&mut d, offset::PC_MINT, &info.pc_mint);
+        put_key(&mut d, offset::LP_MINT, &info.lp_mint);
+        put_key(&mut d, offset::OPEN_ORDERS, &info.open_orders);
+        put_key(&mut d, offset::MARKET, &info.market);
+        put_key(&mut d, offset::MARKET_PROGRAM, &info.market_program);
+        put_key(&mut d, offset::TARGET_ORDERS, &info.target_orders);
+        put_u64(&mut d, offset::LP_AMOUNT, info.lp_amount);
         d
     }
 
     #[test]
     fn a_fresh_pool_matches_its_plan() -> Result<()> {
-        let e = expected();
-        PoolState::parse(&pool_bytes(&e))?.verify(&e)
+        let want = sample();
+        assert_eq!(AmmInfo::parse(&to_bytes(&want))?, want);
+        AmmInfo::parse(&to_bytes(&want))?.check(&want)
     }
 
     #[test]
-    fn every_field_is_compared() -> Result<()> {
-        let e = expected();
-        let mutations: [(&str, usize, usize); 17] = [
-            ("status", STATUS, 8),
-            ("nonce", NONCE, 8),
-            ("coin decimals", COIN_DECIMALS, 8),
-            ("pc decimals", PC_DECIMALS, 8),
-            ("a fee word", FEES + 16, 8),
-            ("pending coin pnl", NEED_TAKE_PNL_COIN, 8),
-            ("pending pc pnl", NEED_TAKE_PNL_PC, 8),
-            ("open time", POOL_OPEN_TIME, 8),
-            ("coin vault", COIN_VAULT, 32),
-            ("pc vault", PC_VAULT, 32),
-            ("coin mint", COIN_MINT, 32),
-            ("pc mint", PC_MINT, 32),
-            ("lp mint", LP_MINT, 32),
-            ("open orders", OPEN_ORDERS, 32),
-            ("market seed", MARKET, 32),
-            ("market program", MARKET_PROGRAM, 32),
-            ("target orders", TARGET_ORDERS, 32),
+    fn every_field_is_compared_and_named() -> Result<()> {
+        let want = sample();
+        let fields: [(&str, usize); 18] = [
+            ("status", offset::STATUS),
+            ("nonce", offset::NONCE),
+            ("coin_decimals", offset::COIN_DECIMALS),
+            ("pc_decimals", offset::PC_DECIMALS),
+            ("fees", offset::FEES + 16),
+            ("need_take_pnl_coin", offset::NEED_TAKE_PNL_COIN),
+            ("need_take_pnl_pc", offset::NEED_TAKE_PNL_PC),
+            ("pool_open_time", offset::POOL_OPEN_TIME),
+            ("coin_vault", offset::COIN_VAULT),
+            ("pc_vault", offset::PC_VAULT),
+            ("coin_mint", offset::COIN_MINT),
+            ("pc_mint", offset::PC_MINT),
+            ("lp_mint", offset::LP_MINT),
+            ("open_orders", offset::OPEN_ORDERS),
+            ("market", offset::MARKET),
+            ("market_program", offset::MARKET_PROGRAM),
+            ("target_orders", offset::TARGET_ORDERS),
+            ("lp_amount", offset::LP_AMOUNT),
         ];
-        for (name, at, len) in mutations {
-            let mut data = pool_bytes(&e);
+        for (name, at) in fields {
+            let mut data = to_bytes(&want);
             data[at] ^= 0xff;
-            assert!(len > 0);
-            assert!(PoolState::parse(&data)?.verify(&e).is_err(), "{name} must be compared");
+            let got = AmmInfo::parse(&data)?;
+            assert_eq!(got.first_difference(&want), Some(name), "{name} must be compared");
+            assert!(got.check(&want).is_err());
         }
-        let mut data = pool_bytes(&e);
-        put_word(&mut data, LP_AMOUNT, e.lp_amount + 1);
-        assert!(PoolState::parse(&data)?.verify(&e).is_err(), "lp amount must be compared");
         Ok(())
     }
 
     #[test]
     fn wrong_lengths_are_rejected_rather_than_read() {
-        let e = expected();
-        let good = pool_bytes(&e);
-        assert!(PoolState::parse(&good[..AMM_INFO_LEN - 1]).is_err());
-        assert!(PoolState::parse(&[]).is_err());
+        let good = to_bytes(&sample());
+        assert!(AmmInfo::parse(&good[..AMM_INFO_LEN - 1]).is_err());
+        assert!(AmmInfo::parse(&[]).is_err());
         let mut long = good;
         long.push(0);
-        assert!(PoolState::parse(&long).is_err());
+        assert!(AmmInfo::parse(&long).is_err());
     }
 
     #[test]
     fn readers_never_panic_past_the_end() {
-        assert_eq!(word(&[0; 7], 0), None);
-        assert_eq!(word(&[0; 8], 1), None);
-        assert_eq!(word(&[0; 8], usize::MAX), None);
-        assert_eq!(key(&[0; 31], 0), None);
-        assert_eq!(key(&[0; 32], 0), Some(Pubkey::default()));
+        assert_eq!(u64_at(&[0; 7], 0), None);
+        assert_eq!(u64_at(&[0; 8], 1), None);
+        assert_eq!(u64_at(&[0; 8], usize::MAX), None);
+        assert_eq!(key_at(&[0; 31], 0), None);
+        assert_eq!(key_at(&[0; 32], 0), Some(Pubkey::default()));
     }
 }

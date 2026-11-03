@@ -56,3 +56,9 @@ fn pinned_fee_words_equal_raydiums_initializer() {
     ];
     assert_eq!(words, [5, 10_000, 25, 10_000, 12, 100, 25, 10_000]);
 }
+
+/// `TARGET_ORDERS_LEN` in the program sizes the rent Beam budgets for the account Raydium creates.
+#[test]
+fn target_orders_size_equals_the_constant_beam_budgets_rent_for() {
+    assert_eq!(size_of::<raydium_amm::state::TargetOrders>(), 2208, "packed TargetOrders size");
+}
