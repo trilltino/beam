@@ -1,0 +1,16 @@
+name: Native-SOL trade local bank
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  legacy-trade-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: tests/legacy-trade-runtime
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+      - run: cargo test --locked --features experimental-raydium

@@ -1,0 +1,20 @@
+[package]
+name = "beam-legacy-trade-runtime"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Synthetic local-bank execution of Beam's native-SOL CreateV2, legacy buy/sell and V2 buy/sell handlers. Not a deployment or a live fee path."
+
+[features]
+default = []
+experimental-raydium = ["beam-program/experimental-raydium"]
+
+[dependencies]
+anchor-lang = "=0.31.1"
+anchor-spl = { version = "=0.31.1", features = ["token_2022", "associated_token"] }
+beam-program = { path = "../../programs/beam" }
+solana-program-test = "=2.2.1"
+solana-sdk = "=2.2.1"
+tokio = { version = "=1.43.0", features = ["macros", "rt-multi-thread"] }
+
+[workspace]
