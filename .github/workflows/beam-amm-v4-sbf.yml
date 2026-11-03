@@ -28,3 +28,54 @@ jobs:
       - name: Beam to pinned Raydium AMM v4, end to end
         working-directory: tests/amm-v4-validator
         run: cargo test --locked --features beam-sbf --test beam_migration -- --test-threads=1
+
+  # The same migration on a real solana-test-validator, with both programs compiled to SBF.
+  live-validator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      RAYDIUM_COMMIT: 91739d8d9f5cf347e0ce14ebe4d2bb7069fb31b6
+      AGAVE_VERSION: v4.4.0
+      # SHA-256 of solana-release-x86_64-unknown-linux-gnu.tar.bz2 as published for that release.
+      AGAVE_SHA256: 3363f4728fe786ac7036e342a20df928aa2e3e43f807fbdce67814840538c574
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-build-sbf
+            ~/.cache/solana
+          key: cargo-build-sbf-4.4.0-platform-tools-1.57
+      - run: command -v cargo-build-sbf || cargo install cargo-build-sbf --version 4.4.0 --locked
+      - name: Build Beam to SBF (local-test)
+        working-directory: programs/beam
+        run: cargo build-sbf --arch v0 --no-default-features --features no-idl,experimental-amm-v4
+      - name: Build the pinned Raydium AMM v4 program to SBF
+        run: |
+          git clone --no-checkout https://github.com/raydium-io/raydium-amm "$RUNNER_TEMP/raydium-amm"
+          git -C "$RUNNER_TEMP/raydium-amm" checkout --detach "$RAYDIUM_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/raydium-amm" rev-parse HEAD)" = "$RAYDIUM_COMMIT"
+          cd "$RUNNER_TEMP/raydium-amm/program"
+          cargo build-sbf --arch v0 --sbf-out-dir "$RUNNER_TEMP/raydium-out"
+          test -s "$RUNNER_TEMP/raydium-out/raydium_amm.so"
+      - name: Install the Agave validator (pinned and hash-checked)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/agave.tar.bz2" \
+            "https://github.com/anza-xyz/agave/releases/download/$AGAVE_VERSION/solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+          echo "$AGAVE_SHA256  $RUNNER_TEMP/agave.tar.bz2" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/agave"
+          tar -xjf "$RUNNER_TEMP/agave.tar.bz2" -C "$RUNNER_TEMP/agave"
+          echo "$RUNNER_TEMP/agave/solana-release/bin" >> "$GITHUB_PATH"
+      - name: Same suite with Raydium as compiled SBF instead of the Rust processor
+        working-directory: tests/amm-v4-validator
+        env:
+          RAYDIUM_SO: ${{ runner.temp }}/raydium-out/raydium_amm.so
+        run: cargo test --locked --features beam-sbf --test beam_migration -- --test-threads=1
+      - name: Migrate on a live solana-test-validator
+        working-directory: tests/amm-v4-validator
+        env:
+          RAYDIUM_SO: ${{ runner.temp }}/raydium-out/raydium_amm.so
+        run: |
+          solana-test-validator --version
+          cargo test --locked --features live-validator --test beam_migration live:: -- --test-threads=1 --nocapture

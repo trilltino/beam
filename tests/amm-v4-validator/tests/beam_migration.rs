@@ -10,7 +10,10 @@
 //! (cd programs/beam && cargo build-sbf --arch v0 --no-default-features --features no-idl --sbf-out-dir target/deploy-production)
 //! ```
 //!
-//! Raydium runs as the pinned Rust source processor, not deployed bytecode.
+//! Raydium runs as the pinned Rust source processor by default. Set `RAYDIUM_SO` to the SBF build
+//! of the same source (`cargo build-sbf --arch v0` in raydium-amm's `program/`) and every test runs
+//! against the compiled program instead; `--features live-validator` adds a run on a real
+//! `solana-test-validator` (Linux). Neither is the deployed mainnet binary.
 //! This does not enable graduation: production builds cannot set `enabled`.
 //!
 //! Run with `cargo test --locked --features beam-sbf --test beam_migration`.
@@ -29,6 +32,7 @@ use spl_token::state::{Account as TokenAccount, AccountState, Mint};
 
 const BEAM: Pubkey = pubkey!("GdaQ7RHbGKGEL5Px66tQP78S67XcgxYAzFUwja71qSJP");
 const SYSTEM: Pubkey = pubkey!("11111111111111111111111111111111");
+const BPF_LOADER_2: Pubkey = pubkey!("BPFLoader2111111111111111111111111111111111");
 const CURVE_CREATOR: Pubkey = pubkey!("Stake11111111111111111111111111111111111111");
 /// `sha256("account:AmmV4Rights")[..8]`, the discriminator draft PR #49 reads.
 const DISC_RIGHTS: [u8; 8] = [88, 155, 79, 159, 221, 232, 159, 98];
@@ -206,12 +210,13 @@ fn pda(seeds: &[&[u8]]) -> Pubkey {
     Pubkey::find_program_address(seeds, &BEAM).0
 }
 
-fn build(opts: Opts) -> (ProgramTest, Fx) {
+/// Fresh addresses for one launch; no account is created here.
+fn make_fx(opts: &Opts) -> Fx {
     let mint = Pubkey::new_unique();
     let ray = derive_pool(&mint);
     let authority = pda(&[b"amm-v4-migration-authority", mint.as_ref()]);
     let curve = pda(&[b"bonding-curve", mint.as_ref()]);
-    let fx = Fx {
+    Fx {
         mint,
         global: pda(&[b"global"]),
         withdraw: Pubkey::new_unique(),
@@ -226,8 +231,11 @@ fn build(opts: Opts) -> (ProgramTest, Fx) {
         rights: pda(&[b"beam-amm-rights", ray.amm.as_ref()]),
         ray,
         donations: opts.donations,
-    };
+    }
+}
 
+fn build(opts: Opts) -> (ProgramTest, Fx) {
+    let fx = make_fx(&opts);
     let dir = if opts.production_binary {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../programs/beam/target/deploy-production")
     } else {
@@ -239,33 +247,56 @@ fn build(opts: Opts) -> (ProgramTest, Fx) {
     pt.prefer_bpf(false);
     pt.set_compute_max_units(1_400_000);
     pt.add_upgradeable_program_to_genesis("beam_program", &BEAM);
-    pt.add_program("raydium_amm", raydium_amm::id(), processor!(process_raydium));
+    // By default Raydium runs as its Rust source processor. With RAYDIUM_SO set to the SBF build of
+    // the same source, every test here runs against the compiled program instead (see the header).
+    match std::env::var("RAYDIUM_SO") {
+        Ok(path) => {
+            let elf = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read RAYDIUM_SO {path}: {e}"));
+            pt.add_account(
+                raydium_amm::id(),
+                Account { lamports: rent().minimum_balance(elf.len()), data: elf, owner: BPF_LOADER_2, executable: true, rent_epoch: 0 },
+            );
+        }
+        Err(_) => pt.add_program("raydium_amm", raydium_amm::id(), processor!(process_raydium)),
+    }
 
+    for (key, account) in fixture_accounts(&opts, &fx) {
+        pt.add_account(key, account);
+    }
+    (pt, fx)
+}
+
+/// Every account the fixtures preload except Global, which names the payer as authority and
+/// so is written once the payer exists. Shared by the program-test bank and the live validator.
+fn fixture_accounts(opts: &Opts, fx: &Fx) -> Vec<(Pubkey, Account)> {
+    let (mint, authority, curve) = (fx.mint, fx.authority, fx.curve);
     let sys = |lamports: u64| Account { lamports, data: vec![], owner: SYSTEM, executable: false, rent_epoch: 0 };
     let program_owned = |data: Vec<u8>| Account { lamports: rent().minimum_balance(data.len()), data, owner: BEAM, executable: false, rent_epoch: 0 };
 
     let curve_data = curve_bytes();
     let curve_lamports = rent().minimum_balance(curve_data.len()) + CREATOR_FEE + PROTOCOL_FEES + REAL_QUOTE + POST_COMPLETE_QUOTE + CURVE_SURPLUS;
-    pt.add_account(fx.curve, Account { lamports: curve_lamports, ..program_owned(curve_data) });
-    pt.add_account(fx.mint, mint_account(&opts.mint_owner, DECIMALS, TOTAL_SUPPLY));
-    pt.add_account(fx.curve_vault, token_account(&mint, &curve, VAULT_TOKENS, None));
-    pt.add_account(spl_token::native_mint::id(), mint_account(&spl_token::id(), 9, 0));
+    let mut out = vec![
+        (fx.curve, Account { lamports: curve_lamports, ..program_owned(curve_data) }),
+        (fx.mint, mint_account(&opts.mint_owner, DECIMALS, TOTAL_SUPPLY)),
+        (fx.curve_vault, token_account(&mint, &curve, VAULT_TOKENS, None)),
+        (spl_token::native_mint::id(), mint_account(&spl_token::id(), 9, 0)),
+    ];
     // Raydium's canonical config, with the pool-creation fee the processor charges.
     let cfg = pinned_config_bytes(&raydium_amm::processor::config_feature::amm_owner::id(), &raydium_amm::processor::config_feature::amm_owner::id(), CREATE_FEE);
-    pt.add_account(fx.ray.config, Account { lamports: rent().minimum_balance(cfg.len()), data: cfg, owner: raydium_amm::id(), executable: false, rent_epoch: 0 });
-    pt.add_account(
+    out.push((fx.ray.config, Account { lamports: rent().minimum_balance(cfg.len()), data: cfg, owner: raydium_amm::id(), executable: false, rent_epoch: 0 }));
+    out.push((
         fx.ray.fee_destination,
         token_account(&spl_token::native_mint::id(), &Pubkey::new_unique(), FEE_DEST_DONATION, Some(rent().minimum_balance(TokenAccount::LEN))),
-    );
+    ));
     if opts.donations {
-        pt.add_account(fx.authority, sys(AUTHORITY_DONATION));
-        pt.add_account(fx.authority_base, token_account(&mint, &authority, BASE_DONATION, None));
-        pt.add_account(fx.authority_wsol, token_account(&spl_token::native_mint::id(), &authority, WSOL_DONATION, Some(rent().minimum_balance(TokenAccount::LEN))));
+        out.push((fx.authority, sys(AUTHORITY_DONATION)));
+        out.push((fx.authority_base, token_account(&mint, &authority, BASE_DONATION, None)));
+        out.push((fx.authority_wsol, token_account(&spl_token::native_mint::id(), &authority, WSOL_DONATION, Some(rent().minimum_balance(TokenAccount::LEN)))));
     }
     if opts.precreate_pool {
-        pt.add_account(fx.ray.amm, sys(1));
+        out.push((fx.ray.amm, sys(1)));
     }
-    (pt, fx)
+    out
 }
 
 async fn start(pt: ProgramTest, fx: &Fx) -> ProgramTestContext {
@@ -346,8 +377,20 @@ fn assert_failed(result: Result<(), BanksClientError>) {
     result.expect_err("transaction must fail");
 }
 
-async fn account(ctx: &mut ProgramTestContext, key: &Pubkey) -> Option<Account> {
-    ctx.banks_client.get_account(*key).await.unwrap()
+/// Reads accounts from the program-test bank or from a live validator, so the effect
+/// assertions below run unchanged against either.
+trait Reader {
+    async fn read(&mut self, key: &Pubkey) -> Option<Account>;
+}
+
+impl Reader for ProgramTestContext {
+    async fn read(&mut self, key: &Pubkey) -> Option<Account> {
+        self.banks_client.get_account(*key).await.unwrap()
+    }
+}
+
+async fn account<R: Reader>(ctx: &mut R, key: &Pubkey) -> Option<Account> {
+    ctx.read(key).await
 }
 
 fn amount(a: &Account) -> u64 {
@@ -355,7 +398,7 @@ fn amount(a: &Account) -> u64 {
 }
 
 /// Every account a migration could touch, for exact rollback comparison.
-async fn snapshot(ctx: &mut ProgramTestContext, fx: &Fx) -> Vec<Option<Account>> {
+async fn snapshot<R: Reader>(ctx: &mut R, fx: &Fx) -> Vec<Option<Account>> {
     let keys = [
         fx.curve, fx.curve_vault, fx.withdraw, fx.authority, fx.authority_base, fx.authority_wsol, fx.authority_lp, fx.receipt, fx.rights, fx.config,
         fx.ray.amm, fx.ray.lp_mint, fx.ray.coin_vault, fx.ray.pc_vault, fx.ray.target_orders, fx.ray.fee_destination, fx.mint,
@@ -394,7 +437,7 @@ const AMM_INFO_LEN: usize = 752;
 /// and a WSOL vault fully backed by lamports. These are the checks the AMM v4 quote adapter
 /// in draft PR #49 makes on raw pool bytes; the offsets are pinned in `pool_layout.rs`.
 /// The rights record it also needs is written by the migration; see `assert_rights_record`.
-async fn assert_quote_ready(ctx: &mut ProgramTestContext, fx: &Fx, coin: u64, pc: u64) {
+async fn assert_quote_ready<R: Reader>(ctx: &mut R, fx: &Fx, coin: u64, pc: u64) {
     let pool = account(ctx, &fx.ray.amm).await.unwrap().data;
     let key_at = |at: usize| Pubkey::try_from(&pool[at..at + 32]).unwrap();
     assert_eq!(u64_at(&pool, 0), 6, "SwapOnly");
@@ -424,7 +467,7 @@ async fn assert_quote_ready(ctx: &mut ProgramTestContext, fx: &Fx, coin: u64, pc
 /// The per-pool rights record, byte for byte what draft PR #49's `register` writes for a
 /// fresh pool: its discriminator, then pool, mint, market seed (the mint), creator and payout
 /// (both the curve's creator), an unset donation record, revision 0 and not paused.
-async fn assert_rights_record(ctx: &mut ProgramTestContext, fx: &Fx) {
+async fn assert_rights_record<R: Reader>(ctx: &mut R, fx: &Fx) {
     let rights = account(ctx, &fx.rights).await.expect("rights record");
     assert_eq!(rights.owner, BEAM);
     let mut expected = DISC_RIGHTS.to_vec();
@@ -443,7 +486,12 @@ async fn assert_migrates(ctx: &mut ProgramTestContext, fx: &Fx) {
     let before = snapshot(ctx, fx).await;
     let payer = ctx.payer.pubkey();
     send(ctx, &[migrate_ix(fx, &payer, CREATE_FEE, budget())]).await.unwrap();
+    assert_migrated(ctx, fx, &before).await;
+}
 
+/// Every effect of a successful standard migration, read from any backend, against the
+/// accounts as they were just before it.
+async fn assert_migrated<R: Reader>(ctx: &mut R, fx: &Fx, before: &[Option<Account>]) {
     let pc = REAL_QUOTE + POST_COMPLETE_QUOTE - MIGRATION_FEE;
     let pool = account(ctx, &fx.ray.amm).await.expect("pool created");
     assert_eq!(pool.owner, raydium_amm::id());
@@ -661,4 +709,173 @@ async fn failure_after_a_successful_migration_rolls_back_the_pool() {
     assert_eq!(snapshot(&mut ctx, &fx).await, before);
     assert!(account(&mut ctx, &fx.ray.amm).await.is_none(), "pool must not survive");
     assert!(account(&mut ctx, &fx.receipt).await.is_none(), "receipt must not survive");
+}
+
+/// The same migration on a real `solana-test-validator`: Beam and the pinned Raydium program
+/// both run as compiled SBF in the validator's own runtime, the fixtures are genesis accounts,
+/// and transactions go over RPC. Anza ships the validator for Linux only, so this runs in CI
+/// (`.github/workflows/beam-amm-v4-sbf.yml`), not on Windows.
+///
+/// Needs `solana-test-validator` on PATH and `RAYDIUM_SO`, the SBF build of raydium-amm at the
+/// pin (`cargo build-sbf --arch v0` in its `program/` directory). `BEAM_SO` defaults to the
+/// local-test Beam build. Run with `--features live-validator`.
+#[cfg(feature = "live-validator")]
+mod live {
+    use super::*;
+    use solana_commitment_config::CommitmentConfig;
+    use solana_keypair::Keypair;
+    use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+    use std::{
+        path::{Path, PathBuf},
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+
+    impl Reader for RpcClient {
+        async fn read(&mut self, key: &Pubkey) -> Option<Account> {
+            self.get_account_with_commitment(key, CommitmentConfig::confirmed()).await.unwrap().value
+        }
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(b64(b""), "");
+        assert_eq!(b64(b"f"), "Zg==");
+        assert_eq!(b64(b"fo"), "Zm8=");
+        assert_eq!(b64(b"foo"), "Zm9v");
+        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// The JSON the validator's `--account` flag reads (the shape of `solana account -o json`).
+    fn write_account(dir: &Path, key: &Pubkey, a: &Account) -> PathBuf {
+        let path = dir.join(format!("{key}.json"));
+        let json = format!(
+            r#"{{"pubkey":"{key}","account":{{"lamports":{},"data":["{}","base64"],"owner":"{}","executable":{},"rentEpoch":0,"space":{}}}}}"#,
+            a.lamports,
+            b64(&a.data),
+            a.owner,
+            a.executable,
+            a.data.len()
+        );
+        std::fs::write(&path, json).unwrap();
+        path
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    /// Kills the validator and removes its ledger even when an assertion panics.
+    struct Validator {
+        child: Child,
+        dir: PathBuf,
+    }
+
+    impl Drop for Validator {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn compute_budget(units: u32) -> Instruction {
+        let mut data = vec![2u8];
+        data.extend_from_slice(&units.to_le_bytes());
+        Instruction { program_id: pubkey!("ComputeBudget111111111111111111111111111111"), accounts: vec![], data }
+    }
+
+    async fn send_tx(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction]) -> Result<(), String> {
+        let blockhash = rpc.get_latest_blockhash().await.map_err(|e| format!("{e:?}"))?;
+        let mut all = vec![compute_budget(1_400_000)];
+        all.extend_from_slice(ixs);
+        let tx = Transaction::new_signed_with_payer(&all, Some(&payer.pubkey()), &[payer], blockhash);
+        rpc.send_and_confirm_transaction(&tx).await.map(|_| ()).map_err(|e| format!("{e:?}"))
+    }
+
+    #[tokio::test]
+    async fn live_validator_migrates_through_real_sbf_programs() {
+        let beam_so = std::env::var("BEAM_SO")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../programs/beam/target/deploy/beam_program.so").to_string());
+        let raydium_so = std::env::var("RAYDIUM_SO").expect("set RAYDIUM_SO to the SBF build of raydium-amm at the pin");
+        for so in [&beam_so, &raydium_so] {
+            assert!(Path::new(so).exists(), "missing program binary: {so}");
+        }
+
+        let payer = Keypair::new();
+        let fx = make_fx(&Opts::standard());
+        let dir = std::env::temp_dir().join(format!("beam-live-{}", std::process::id()));
+        let accounts_dir = dir.join("accounts");
+        std::fs::create_dir_all(&accounts_dir).unwrap();
+
+        // Global names the payer as authority, so it is written here with the other fixtures.
+        let global = global_bytes(&payer.pubkey(), &fx.withdraw);
+        let mut accounts = fixture_accounts(&Opts::standard(), &fx);
+        accounts.push((fx.global, Account { lamports: rent().minimum_balance(global.len()), data: global, owner: BEAM, executable: false, rent_epoch: 0 }));
+
+        let (rpc_port, faucet_port) = (free_port(), free_port());
+        let mut cmd = Command::new("solana-test-validator");
+        cmd.args(["--reset", "--quiet", "--ledger"])
+            .arg(dir.join("ledger"))
+            .args(["--rpc-port", &rpc_port.to_string(), "--faucet-port", &faucet_port.to_string()])
+            .args(["--bpf-program", &BEAM.to_string(), &beam_so])
+            .args(["--bpf-program", &raydium_amm::id().to_string(), &raydium_so]);
+        for (key, account) in &accounts {
+            let file = write_account(&accounts_dir, key, account);
+            cmd.arg("--account").arg(key.to_string()).arg(file);
+        }
+        let child = cmd
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("solana-test-validator must be on PATH (Linux release from anza-xyz/agave)");
+        let mut validator = Validator { child, dir };
+
+        let mut rpc = RpcClient::new_with_commitment(format!("http://127.0.0.1:{rpc_port}"), CommitmentConfig::confirmed());
+        let started = Instant::now();
+        loop {
+            if let Some(status) = validator.child.try_wait().unwrap() {
+                panic!("solana-test-validator exited early: {status}");
+            }
+            if rpc.get_health().await.is_ok() {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(180), "validator did not become healthy in 180s");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        let signature = rpc.request_airdrop(&payer.pubkey(), 20_000_000_000).await.unwrap();
+        while !rpc.confirm_transaction(&signature).await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        let key = payer.pubkey();
+        send_tx(&rpc, &payer, &[configure_ix(&fx, &key, CREATE_FEE)]).await.unwrap();
+        send_tx(&rpc, &payer, &[enable_ix(&fx, &key, true)]).await.unwrap();
+
+        let before = snapshot(&mut rpc, &fx).await;
+        send_tx(&rpc, &payer, &[migrate_ix(&fx, &key, CREATE_FEE, budget())]).await.expect("migration on the live validator");
+        assert_migrated(&mut rpc, &fx, &before).await;
+
+        // The pool exists now, so a replay must fail and leave everything as it is.
+        let after = snapshot(&mut rpc, &fx).await;
+        assert!(send_tx(&rpc, &payer, &[migrate_ix(&fx, &key, CREATE_FEE, budget())]).await.is_err(), "replay must fail");
+        assert_eq!(snapshot(&mut rpc, &fx).await, after, "a failed replay changed state");
+    }
 }

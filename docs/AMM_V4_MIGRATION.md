@@ -92,7 +92,8 @@ The LP tokens stay in the migration PDA's associated token account and
 no Beam instruction can move them. That is not an LP custody design. It is the least committing
 state while the maintainer decides between burn, lock and retain. Holding them keeps Beam's
 fee-claim option open but also means that, until a release path exists, nobody can withdraw
-principal.
+principal. The options, with Raydium's fee mechanics from the pinned source, are in
+[LP_CUSTODY_DECISION.md](LP_CUSTODY_DECISION.md); the choice is the owner's.
 
 ## Evidence
 
@@ -126,6 +127,11 @@ for byte against its state before the transaction. With the setup bounds, a call
 make Raydium fail mid-CPI for lack of rent, and Raydium's other checks all pass for state Beam
 derived, so no test provokes an in-CPI Raydium failure; rollback after a completed CPI is covered.
 
+The suite also passes against Raydium compiled to SBF (`RAYDIUM_SO`, run locally). The live
+validator job in the same workflow builds Beam, builds Raydium at the pin, installs Agave
+`v4.4.0` after checking its SHA-256, and migrates on `solana-test-validator`, then checks that a
+replay fails and changes nothing.
+
 `cargo check --locked --all-features` fails in `programs/beam` because of the inherited
 `anchor-debug` feature (`solana_program` unresolved). That is independent of this work.
 
@@ -158,8 +164,12 @@ pools this instruction produces:
 
 ## What this does not establish
 
-- It runs Raydium's **Rust source** at the pin, not deployed bytecode, and Beam as an SBF build
-  of this source. No `solana-test-validator` run, no deployed-program equivalence.
+- The tests run Raydium's source at the pin, both as the Rust processor and (with `RAYDIUM_SO`)
+  as that source compiled to SBF, and Beam as an SBF build of this source. A live
+  `solana-test-validator` run exists as the `live-validator` feature and a Linux CI job. That job
+  is the first place it runs: it has not been executed on this machine, because Anza ships the
+  validator for Linux only. None of this is the deployed mainnet Raydium binary, so
+  deployed-program equivalence is still not established.
 - Post-CPI pool checks read the pool status and vault and LP accounts, not the whole packed
   `AmmInfo`. Draft #34's source-pinned decoder is the better long-term check.
 - The Beam IDL is not regenerated. The instructions are built from discriminators in the test.
