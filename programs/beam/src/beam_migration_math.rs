@@ -26,31 +26,33 @@ pub fn protected_curve_floor(curve_lamports: u64, rent: u64, creator_fee: u64, p
 mod tests {
     use super::*;
     #[test]
-    fn migration_includes_post_completion_quote_and_charges_fee_once() {
-        assert_eq!(migration_quote(100, 25, 10).unwrap(), (125, 115));
-        assert_eq!(migration_quote(100, 0, 10).unwrap(), (100, 90));
-        assert_eq!(migration_quote(0, 25, 0).unwrap(), (25, 25));
-        assert_eq!(migration_quote(u64::MAX, 0, 0).unwrap(), (u64::MAX, u64::MAX));
+    fn migration_includes_post_completion_quote_and_charges_fee_once() -> Result<()> {
+        assert_eq!(migration_quote(100, 25, 10)?, (125, 115));
+        assert_eq!(migration_quote(100, 0, 10)?, (100, 90));
+        assert_eq!(migration_quote(0, 25, 0)?, (25, 25));
+        assert_eq!(migration_quote(u64::MAX, 0, 0)?, (u64::MAX, u64::MAX));
         assert!(migration_quote(0, 0, 0).is_err());
         assert!(migration_quote(100, 25, 125).is_err());
         assert!(migration_quote(u64::MAX, 1, 0).is_err());
         assert!(migration_quote(100, 25, 126).is_err());
+        Ok(())
     }
     #[test]
-    fn migration_preserves_fee_liabilities_and_donor_surplus() {
-        assert_eq!(protected_curve_floor(0, 0, 0, 0, 0).unwrap(), 0);
-        assert_eq!(protected_curve_floor(u64::MAX, 0, 0, 0, u64::MAX).unwrap(), 0);
-        let (owned, pool) = migration_quote(100, 25, 10).unwrap();
-        let floor = protected_curve_floor(150, 10, 5, 10, owned).unwrap();
+    fn migration_preserves_fee_liabilities_and_donor_surplus() -> Result<()> {
+        assert_eq!(protected_curve_floor(0, 0, 0, 0, 0)?, 0);
+        assert_eq!(protected_curve_floor(u64::MAX, 0, 0, 0, u64::MAX)?, 0);
+        let (owned, pool) = migration_quote(100, 25, 10)?;
+        let floor = protected_curve_floor(150, 10, 5, 10, owned)?;
         assert_eq!((owned, pool, floor), (125, 115, 25));
         assert_eq!(150 - pool - 10, floor);
         assert!(protected_curve_floor(149, 10, 5, 10, owned).is_err());
         let donor_surplus = 42;
         let funded = 150 + donor_surplus;
-        assert_eq!(protected_curve_floor(funded, 10, 5, 10, owned).unwrap(), floor);
+        assert_eq!(protected_curve_floor(funded, 10, 5, 10, owned)?, floor);
         assert_eq!(funded - pool - 10, floor + donor_surplus);
         assert!(protected_curve_floor(u64::MAX, u64::MAX, 1, 0, 0).is_err());
         assert!(protected_curve_floor(u64::MAX, 0, u64::MAX, 1, 0).is_err());
         assert!(protected_curve_floor(u64::MAX, 1, 0, 0, u64::MAX).is_err());
+        Ok(())
     }
 }
