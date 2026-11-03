@@ -68,6 +68,9 @@ const ERR_SETUP_BOUNDS: u32 = 7008;
 const ERR_OPEN_TIME: u32 = 7009;
 const ERR_SOURCE: u32 = 7010;
 const ERR_UNSUPPORTED_MINT: u32 = 7005;
+const ERR_BALANCE: u32 = 7004;
+/// `PumpError::BondingCurveNotComplete`, offset 6000.
+const ERR_CURVE_NOT_COMPLETE: u32 = 6006;
 
 fn rent() -> Rent {
     Rent::default()
@@ -155,13 +158,13 @@ fn global_bytes(authority: &Pubkey, withdraw: &Pubkey) -> Vec<u8> {
 }
 
 /// A completed curve: all real tokens sold, quote reserves recorded.
-fn curve_bytes() -> Vec<u8> {
+fn curve_bytes(complete: bool) -> Vec<u8> {
     let zero = Pubkey::default();
     let mut d = DISC_CURVE.to_vec();
     for v in [1u64, 1, 0, REAL_QUOTE, TOTAL_SUPPLY] {
         put_u64(&mut d, v);
     }
-    d.push(1); // complete
+    d.push(u8::from(complete)); // complete
     put_key(&mut d, &CURVE_CREATOR);
     d.extend_from_slice(&[0, 0]); // mayhem, cashback
     put_key(&mut d, &zero); // native SOL quote
@@ -190,6 +193,12 @@ struct Opts {
     frozen_base: bool,
     /// Freeze the migration PDA's pre-existing wrapped-SOL account.
     frozen_wsol: bool,
+    /// Whether the curve has completed its sale.
+    curve_complete: bool,
+    /// Lamports the curve holds below what it needs to cover rent, fee claims and the pool's quote.
+    curve_short_by: u64,
+    /// Tokens in the curve vault.
+    vault_tokens: u64,
 }
 
 impl Opts {
@@ -202,6 +211,9 @@ impl Opts {
             mint_decimals: DECIMALS,
             frozen_base: false,
             frozen_wsol: false,
+            curve_complete: true,
+            curve_short_by: 0,
+            vault_tokens: VAULT_TOKENS,
         }
     }
 }
@@ -311,12 +323,12 @@ fn fixture_accounts(opts: &Opts, fx: &Fx) -> Vec<(Pubkey, Account)> {
     let sys = |lamports: u64| Account { lamports, data: vec![], owner: SYSTEM, executable: false, rent_epoch: 0 };
     let program_owned = |data: Vec<u8>| Account { lamports: rent().minimum_balance(data.len()), data, owner: BEAM, executable: false, rent_epoch: 0 };
 
-    let curve_data = curve_bytes();
-    let curve_lamports = rent().minimum_balance(curve_data.len()) + CREATOR_FEE + PROTOCOL_FEES + REAL_QUOTE + POST_COMPLETE_QUOTE + CURVE_SURPLUS;
+    let curve_data = curve_bytes(opts.curve_complete);
+    let curve_lamports = rent().minimum_balance(curve_data.len()) + CREATOR_FEE + PROTOCOL_FEES + REAL_QUOTE + POST_COMPLETE_QUOTE + CURVE_SURPLUS - opts.curve_short_by;
     let mut out = vec![
         (fx.curve, Account { lamports: curve_lamports, ..program_owned(curve_data) }),
         (fx.mint, mint_account(&opts.mint_owner, opts.mint_decimals, TOTAL_SUPPLY)),
-        (fx.curve_vault, token_account(&mint, &curve, VAULT_TOKENS, None)),
+        (fx.curve_vault, token_account(&mint, &curve, opts.vault_tokens, None)),
         (spl_token::native_mint::id(), mint_account(&spl_token::id(), 9, 0)),
     ];
     // Raydium's canonical config, with the pool-creation fee the processor charges.
@@ -631,6 +643,49 @@ async fn production_build_cannot_enable_migration() {
     send(&mut ctx, &[enable_ix(&fx, &payer, false)]).await.expect("the transaction succeeds");
 }
 
+fn compute_limit(units: u32) -> Instruction {
+    let mut data = vec![2u8];
+    data.extend_from_slice(&units.to_le_bytes());
+    Instruction { program_id: pubkey!("ComputeBudget111111111111111111111111111111"), accounts: vec![], data }
+}
+
+#[tokio::test]
+async fn an_incomplete_curve_is_refused_before_anything_moves() {
+    let (mut ctx, fx) = enabled_context(Opts { curve_complete: false, ..Opts::standard() }, CREATE_FEE).await;
+    let payer = ctx.payer.pubkey();
+    let before = snapshot(&mut ctx, &fx).await;
+    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_CURVE_NOT_COMPLETE);
+    assert_eq!(snapshot(&mut ctx, &fx).await, before, "an incomplete curve must change nothing");
+}
+
+/// The curve must cover its rent, the creator and protocol fee claims, and the pool's quote. One
+/// lamport short is refused; exactly covering it migrates and leaves the curve at that floor.
+#[tokio::test]
+async fn a_curve_one_lamport_short_of_its_liabilities_is_refused_and_an_exact_one_migrates() {
+    let (mut ctx, fx) = enabled_context(Opts { curve_short_by: CURVE_SURPLUS + 1, ..Opts::standard() }, CREATE_FEE).await;
+    let payer = ctx.payer.pubkey();
+    let before = snapshot(&mut ctx, &fx).await;
+    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_BALANCE);
+    assert_eq!(snapshot(&mut ctx, &fx).await, before, "a short curve must change nothing");
+
+    let (mut ctx, fx) = enabled_context(Opts { curve_short_by: CURVE_SURPLUS, ..Opts::standard() }, CREATE_FEE).await;
+    let payer = ctx.payer.pubkey();
+    send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await.expect("an exactly covered curve migrates");
+    let curve = must(&mut ctx, &fx.curve).await;
+    assert_eq!(curve.lamports, rent().minimum_balance(curve.data.len()) + CREATOR_FEE + PROTOCOL_FEES, "the curve keeps exactly its protected floor");
+}
+
+#[tokio::test]
+async fn an_empty_or_oversized_curve_vault_is_refused() {
+    for vault_tokens in [0, TOTAL_SUPPLY + 1] {
+        let (mut ctx, fx) = enabled_context(Opts { vault_tokens, ..Opts::standard() }, CREATE_FEE).await;
+        let payer = ctx.payer.pubkey();
+        let before = snapshot(&mut ctx, &fx).await;
+        assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_BALANCE);
+        assert_eq!(snapshot(&mut ctx, &fx).await, before, "{vault_tokens} vault tokens must change nothing");
+    }
+}
+
 /// Raydium's initializer overflows a `u64` for a mint with 19 or more decimals, so Beam refuses
 /// such a mint with a clear error before any funds move.
 #[tokio::test]
@@ -793,6 +848,8 @@ async fn substituted_accounts_are_rejected() {
         (18, "target orders", true),
         (19, "fee destination", true),
         (20, "authority lp", true),
+        (21, "receipt", false),
+        (22, "rights", false),
     ] {
         let mut ix = migrate_ix(&fx, &payer, CREATE_FEE, budget());
         ix.accounts[index].pubkey = Pubkey::new_unique();
@@ -946,27 +1003,25 @@ mod live {
         }
     }
 
-    fn compute_budget(units: u32) -> Instruction {
-        let mut data = vec![2u8];
-        data.extend_from_slice(&units.to_le_bytes());
-        Instruction { program_id: pubkey!("ComputeBudget111111111111111111111111111111"), accounts: vec![], data }
-    }
-
-    async fn signed_tx(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction]) -> Result<Transaction, String> {
+    async fn signed_tx(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction], units: u32) -> Result<Transaction, String> {
         let blockhash = rpc.get_latest_blockhash().await.map_err(|e| format!("{e:?}"))?;
-        let mut all = vec![compute_budget(1_400_000)];
+        let mut all = vec![compute_limit(units)];
         all.extend_from_slice(ixs);
         Ok(Transaction::new_signed_with_payer(&all, Some(&payer.pubkey()), &[payer], blockhash))
     }
 
     async fn send_tx(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction]) -> Result<(), String> {
-        let tx = signed_tx(rpc, payer, ixs).await?;
+        send_with_limit(rpc, payer, ixs, 1_400_000).await
+    }
+
+    async fn send_with_limit(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction], units: u32) -> Result<(), String> {
+        let tx = signed_tx(rpc, payer, ixs, units).await?;
         rpc.send_and_confirm_transaction(&tx).await.map(|_| ()).map_err(|e| format!("{e:?}"))
     }
 
     /// Simulates the transaction and returns the compute units it uses and its serialized size.
     async fn measure(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction]) -> (u64, usize) {
-        let tx = signed_tx(rpc, payer, ixs).await.expect("a signed transaction");
+        let tx = signed_tx(rpc, payer, ixs, 1_400_000).await.expect("a signed transaction");
         // One-byte signature count, then 64 bytes per signature, then the message.
         let bytes = tx.message.serialize().len() + 1 + 64 * tx.signatures.len();
         let sim = rpc.simulate_transaction(&tx).await.expect("the validator simulates the transaction").value;
@@ -1042,6 +1097,11 @@ mod live {
         println!("MEASURED migrate_amm_v4: {units} compute units, {bytes} byte transaction");
         assert!(units > 200_000, "the default 200000 limit must not suffice, or the docs are wrong: {units}");
         assert!(units < 1_400_000 && bytes <= 1232, "{units} units, {bytes} bytes");
+        // The validator enforces a transaction's own compute limit (the program-test bank does not), so
+        // this is where "too little compute" is meaningful: it must fail and change nothing.
+        let starved = send_with_limit(&rpc, &payer, &[migrate_ix(&fx, &key, CREATE_FEE, budget())], 100_000).await;
+        assert!(starved.is_err(), "100000 compute units must not be enough for a migration");
+        assert_eq!(snapshot(&mut rpc, &fx).await, before, "running out of compute must change nothing");
         send_tx(&rpc, &payer, &[migrate_ix(&fx, &key, CREATE_FEE, budget())]).await.expect("migration on the live validator");
         assert_migrated(&mut rpc, &fx, &before).await;
 

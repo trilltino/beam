@@ -120,8 +120,8 @@ does **not** show.
 | Level | Result | Where | Does not show |
 | --- | --- | --- | --- |
 | Raydium source correctness | Pool layout offsets, fee constants and status rules read from the pinned source and pinned by tests (`pool_layout.rs`, 3 tests) | local, CI | That any deployed binary matches that source |
-| Rust processor integration | 16 migration tests pass | local, CI | Anything about compiled bytecode |
-| Compiled-SBF integration | The same 16 pass with the pinned source compiled to SBF and loaded under the upgradeable loader (`RAYDIUM_SO`) | local, CI | The deployed binary |
+| Rust processor integration | 19 migration tests pass | local, CI | Anything about compiled bytecode |
+| Compiled-SBF integration | The same 19 pass with the pinned source compiled to SBF and loaded under the upgradeable loader (`RAYDIUM_SO`) | local, CI | The deployed binary |
 | Local validator | One migration plus a failed replay on `solana-test-validator` 4.4.0 with Beam and the SBF build loaded | CI (Linux only) | Mainnet state |
 | Deployed-program identity | `675kPX9M…` is executable under the upgradeable loader; program-data `A7ZG7By…`; last deployed slot 445763204; upgrade authority `FytDrVz…`, a single key, so Raydium can change the binary at any time (read-only RPC, 3 Nov 2026) | local script, CI dump | That the binary is unchanged since |
 | Deployed-binary behavior | The binary dumped from mainnet completes the same live migration on the validator (208,441 compute units) | CI, informational step | Real mainnet accounts: the Raydium config account and fixtures are synthetic |
@@ -146,17 +146,23 @@ uses by default. `--arch v0` is required: `cargo-build-sbf` 4.4 defaults to SBPF
 3.0.0 test runtime rejects with `UnsupportedProgramId`. The `beam-sbf` feature keeps the existing
 validator CI job from needing an SBF build.
 
-### What the 16 migration tests cover
+### What the 19 migration tests cover
 
 Success with and without pre-existing source accounts and donations (exact vault, LP, fee, curve,
 refund, receipt and rights values, and every field of the new pool); disabled config; replay; the fee
 cap on both the caller and stored sides; setup funding one lamport under the exact cost and one over
 the accepted worst case; funding for a higher fee cap refunded to the exact cost; an open time in the
-future; a mint with 19 or more decimals; frozen base and WSOL sources; a production-style build that
+future; a mint with 19 or more decimals; frozen base and WSOL sources; an incomplete curve; a curve one
+lamport short of its rent, fee claims and quote (refused) and one that exactly covers them (migrates and
+leaves exactly its floor); an empty and an oversized curve vault; a production-style build that
 cannot enable migration; a Token-2022 mint; a pre-created pool; a real third-party `Initialize2`
-followed by a fail-closed migration; ten substituted accounts; and a later instruction failing after a
+followed by a fail-closed migration; twelve substituted accounts (including the receipt and rights record); and a later instruction failing after a
 successful migration. Each failure compares every touched account byte for byte with its state before
 the transaction.
+
+One case runs only on the live validator: a migration given 100,000 compute units fails and changes
+nothing. `solana-program-test` applies its own global limit and ignores a transaction's
+`SetComputeUnitLimit`, so the check means nothing there.
 
 ### Atomicity: where a failure can happen
 
