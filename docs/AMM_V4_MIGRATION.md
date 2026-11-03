@@ -26,18 +26,18 @@ file lands.
 
 | Instruction | Who | Effect |
 | --- | --- | --- |
-| `configure_amm_v4(max_create_pool_fee)` | `Global.authority` | Creates the `beam-amm-v4-config` PDA with `enabled = false` and the largest Raydium create-pool fee Beam will pay. |
+| `configure_amm_v4(max_pool_fee)` | `Global.authority` | Creates the `beam-amm-v4-config` PDA with `enabled = false` and the largest Raydium create-pool fee Beam will pay. |
 | `set_amm_v4_enabled(enabled)` | `Global.authority` | `false` always works. `true` is rejected unless the program was built with `experimental-amm-v4`, which no release uses. |
-| `migrate_amm_v4(open_time, max_create_pool_fee, setup_budget)` | anyone, paying | Graduates one completed curve and writes its rights record. Requires `config.enabled` and the inherited `Global.enable_migrate`. |
+| `migrate_amm_v4(open_time, max_pool_fee, budget)` | anyone, paying | Graduates one completed curve and writes its rights record. Requires `config.enabled` and the inherited `Global.enable_migrate`. |
 
-`max_create_pool_fee` must not exceed the stored cap, and Raydium's *current*
+`max_pool_fee` must not exceed the stored cap, and Raydium's *current*
 fee, read from its canonical config immediately before the CPI, must not exceed
-`max_create_pool_fee`.
+`max_pool_fee`.
 
-`setup_budget` is bounded on both sides. Beam computes the exact setup cost: the
+`budget` is bounded on both sides. Beam computes the exact setup cost: the
 create-pool fee plus rent for the six accounts `Initialize2` creates (pool,
 target orders, LP mint, two vaults, LP account). The budget must be at least that
-cost for the current fee and at most that cost at `max_create_pool_fee`
+cost for the current fee and at most that cost at `max_pool_fee`
 (`SetupFundingOutOfBounds` otherwise). After the CPI, Beam requires Raydium to
 have charged exactly the cost, refunds the rest, and records the exact cost as
 `setup_spent`. A caller can no longer over-fund the migration PDA or start a CPI
@@ -67,7 +67,7 @@ reviewed limit above the 200,000 default.
 4. **Baseline.** Requires the migration PDA's base and WSOL accounts to be initialized, unfrozen,
    delegate-free and close-authority-free, and records their balances: donations are neither adopted
    nor swept.
-5. **Funding.** Moves `setup_budget` from the caller to the migration PDA, the planned tokens to its
+5. **Funding.** Moves `budget` from the caller to the migration PDA, the planned tokens to its
    base account, and the planned SOL into its WSOL account, then `SyncNative`.
 6. Calls Raydium `Initialize2` with the migration PDA as wallet, signing with `invoke_signed`. The 18
    accounts other than the seed must be distinct keys.
@@ -174,10 +174,10 @@ nothing. `solana-program-test` applies its own global limit and ignores a transa
 | Failure point | Reachable? | Evidence |
 | --- | --- | --- |
 | Before funding | Yes | Every refusal above leaves all 17 watched accounts byte-identical |
-| After partial funding | No | The causes (frozen or delegated sources, wrong balances, bad budget, bad accounts) are rejected in `preflight` and `baseline`, before any lamport or token moves |
+| After partial funding | No | The causes (frozen or delegated sources, wrong balances, bad budget, bad accounts) are rejected in `check` and `snapshot`, before any lamport or token moves |
 | During the Raydium CPI | No | With the bounds above no input makes Raydium fail; a pre-created pool is refused before funding |
 | After a successful CPI | Yes | `failure_after_a_successful_migration_rolls_back_the_pool` appends a failing instruction and checks the pool, receipt and every balance are gone |
-| During final settlement | No | The fee payout is bounded by the same floor `preflight` already proved |
+| During final settlement | No | The fee payout is bounded by the same floor `check` already proved |
 | Receipt creation | Yes | A replay fails at account validation with the pool and receipt untouched |
 
 Solana makes the whole transaction atomic, so the unreachable rows rest on that guarantee plus the
@@ -227,7 +227,7 @@ pools this instruction produces:
 
 ## Pool verification and source policy
 
-`verify_pool` decodes the new pool with `beam_amm_v4_pool_state.rs` and compares status, authority
+`verify` decodes the new pool with `beam_amm_v4_pool_state.rs` and compares status, authority
 bump, both decimals, the eight fee words, pending PnL, open time, both vaults, both mints, the LP
 mint, the pool seed, the target-orders address, the absence of any OpenBook link, and the LP total
 (the user's LP plus the permanently locked `10^coin_decimals`). It then checks the target-orders
@@ -236,7 +236,7 @@ indexing that can panic.
 
 Draft #29 and #34 check source and post-CPI balances for **exact equality**. That is stricter than
 this branch on purpose does not follow: anyone could donate one token unit to the migration PDA's
-token account and make every migration fail forever. Here donations are recorded in `baseline` and
+token account and make every migration fail forever. Here donations are recorded in `snapshot` and
 preserved, while the sources must still be initialized, unfrozen, delegate-free and
 close-authority-free (`InvalidMigrationSource`). #29 also found that Raydium's initializer overflows
 a `u64` for a mint with 19 or more decimals; that guard is adopted (`MAX_SAFE_MINT_DECIMALS`).

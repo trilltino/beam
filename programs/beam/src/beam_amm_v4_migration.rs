@@ -1,4 +1,4 @@
-//! Gated Raydium AMM v4 migration: production builds cannot enable it, and every Raydium address is derived from the mint.
+//! Gated Raydium AMM v4 migration: production builds cannot enable it, every Raydium address is derived from the mint, and all LP Beam receives is burned.
 #![allow(clippy::needless_pass_by_value)]
 use crate::{
     beam_amm_v4 as abi,
@@ -16,7 +16,7 @@ use anchor_lang::solana_program::{
 };
 use anchor_spl::{
     associated_token::AssociatedToken,
-    token::{self, Mint, Token, TokenAccount, TransferChecked},
+    token::{self, Burn, Mint, Token, TokenAccount, TransferChecked},
 };
 
 pub const V4_CONFIG_SEED: &[u8] = b"beam-amm-v4-config";
@@ -26,22 +26,23 @@ pub const V4_RIGHTS_SEED: &[u8] = b"beam-amm-rights";
 pub const V4_RIGHTS_SPACE: usize = 8 + 6 * 32 + 8 + 1;
 pub const V4_MAX_DECIMALS: u8 = 18;
 const MARKET_SEED_SLOT: usize = 14;
-pub const LP_HELD_UNRESOLVED: u8 = 0;
+/// [`BeamAmmV4Receipt::lp_disposition`]: all LP issued to Beam was burned.
+pub const LP_BURNED: u8 = 1;
 
 #[cfg(feature = "raydium-devnet")]
 pub const AMM_V4_PROGRAM: Pubkey = abi::DEVNET_PROGRAM_ID;
 #[cfg(not(feature = "raydium-devnet"))]
 pub const AMM_V4_PROGRAM: Pubkey = abi::MAINNET_PROGRAM_ID;
 
-#[account(discriminator = [59, 49, 150, 32, 250, 49, 106, 30])]
-pub struct AmmV4Config {
+#[account]
+pub struct BeamAmmV4Config {
     pub enabled: bool,
     pub raydium_program: Pubkey,
     pub max_pool_fee: u64,
 }
 
 #[account(discriminator = [88, 155, 79, 159, 221, 232, 159, 98])]
-pub struct AmmV4Rights {
+pub struct BeamAmmV4Rights {
     pub pool: Pubkey,
     pub mint: Pubkey,
     pub market_seed: Pubkey,
@@ -52,8 +53,8 @@ pub struct AmmV4Rights {
     pub paused: bool,
 }
 
-#[account(discriminator = [179, 123, 65, 124, 38, 208, 232, 159])]
-pub struct AmmV4Receipt {
+#[account]
+pub struct BeamAmmV4Receipt {
     pub mint: Pubkey,
     pub pool: Pubkey,
     pub lp_mint: Pubkey,
@@ -67,8 +68,8 @@ pub struct AmmV4Receipt {
     pub lp_disposition: u8,
 }
 
-#[event(discriminator = [204, 117, 41, 216, 212, 194, 93, 124])]
-pub struct AmmV4Migrated {
+#[event]
+pub struct BeamAmmV4Migration {
     pub mint: Pubkey,
     pub pool: Pubkey,
     pub coin_amount: u64,
@@ -85,7 +86,7 @@ pub struct ConfigureV4<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
     #[account(init, payer = authority, space = 8 + 1 + 32 + 8, seeds = [V4_CONFIG_SEED], bump)]
-    pub config: Account<'info, AmmV4Config>,
+    pub config: Account<'info, BeamAmmV4Config>,
     pub system_program: Program<'info, System>,
 }
 
@@ -95,7 +96,7 @@ pub struct EnableV4<'info> {
     pub global: Box<Account<'info, Global>>,
     pub authority: Signer<'info>,
     #[account(mut, seeds = [V4_CONFIG_SEED], bump)]
-    pub config: Account<'info, AmmV4Config>,
+    pub config: Account<'info, BeamAmmV4Config>,
 }
 
 #[derive(Accounts)]
@@ -113,7 +114,7 @@ pub struct MigrateV4<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
     #[account(seeds = [V4_CONFIG_SEED], bump, constraint = config.enabled @ BeamError::MigrationNotEnabled)]
-    pub config: Box<Account<'info, AmmV4Config>>,
+    pub config: Box<Account<'info, BeamAmmV4Config>>,
     /// CHECK: fixed executable program; never frontend-selected.
     #[account(address = AMM_V4_PROGRAM, executable)]
     pub amm_program: UncheckedAccount<'info>,
@@ -152,9 +153,9 @@ pub struct MigrateV4<'info> {
     #[account(mut)]
     pub lp_account: UncheckedAccount<'info>,
     #[account(init, payer = user, space = 8 + 3 * 32 + 8 * 7 + 1, seeds = [V4_RECEIPT_SEED, mint.key().as_ref()], bump)]
-    pub receipt: Box<Account<'info, AmmV4Receipt>>,
+    pub receipt: Box<Account<'info, BeamAmmV4Receipt>>,
     #[account(init, payer = user, space = V4_RIGHTS_SPACE, seeds = [V4_RIGHTS_SEED, pool.key().as_ref()], bump)]
-    pub rights: Box<Account<'info, AmmV4Rights>>,
+    pub rights: Box<Account<'info, BeamAmmV4Rights>>,
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
@@ -573,6 +574,23 @@ fn verify(a: &MigrateV4, c: &Checked, before: &Before, req: &Req) -> Result<()> 
     Ok(())
 }
 
+/// Burns exactly the LP Raydium issued to the migration authority; a failure rolls the whole migration back.
+fn burn_lp(a: &MigrateV4, c: &Checked, req: &Req) -> Result<()> {
+    let bump = [req.auth_bump];
+    let seeds: &[&[u8]] = &[V4_AUTH_SEED, req.mint.as_ref(), &bump];
+    token::burn(
+        CpiContext::new_with_signer(
+            a.token_program.to_account_info(),
+            Burn { mint: a.lp_mint.to_account_info(), from: a.lp_account.to_account_info(), authority: a.migrator.to_account_info() },
+            &[seeds],
+        ),
+        c.plan.user_lp,
+    )?;
+    let lp_mint = token::spl_token::state::Mint::unpack(&a.lp_mint.try_borrow_data()?)?;
+    let lp = unpack(&a.lp_account.to_account_info())?;
+    ensure(lp_mint.supply == 0 && lp.amount == 0, BeamError::InvalidMigrationResult, "LP was not burned in full")
+}
+
 /// Returns the unspent setup money to the caller.
 fn refund(a: &MigrateV4, req: &Req, amount: u64) -> Result<()> {
     if amount == 0 {
@@ -600,7 +618,7 @@ fn pay_fee(a: &MigrateV4, c: &Checked) -> Result<()> {
 /// Writes the rights record and receipt, zeroes the curve's reserves and emits the event.
 fn record(a: &mut MigrateV4, c: &Checked, req: &Req) {
     let creator = a.bonding_curve.creator;
-    a.rights.set_inner(AmmV4Rights {
+    a.rights.set_inner(BeamAmmV4Rights {
         pool: c.pool.amm,
         mint: req.mint,
         market_seed: req.mint,
@@ -610,7 +628,7 @@ fn record(a: &mut MigrateV4, c: &Checked, req: &Req) {
         revision: 0,
         paused: false,
     });
-    a.receipt.set_inner(AmmV4Receipt {
+    a.receipt.set_inner(BeamAmmV4Receipt {
         mint: req.mint,
         pool: c.pool.amm,
         lp_mint: c.pool.lp_mint,
@@ -621,13 +639,13 @@ fn record(a: &mut MigrateV4, c: &Checked, req: &Req) {
         lp_amount: c.plan.user_lp,
         setup_spent: c.setup,
         open_time: req.open_time,
-        lp_disposition: LP_HELD_UNRESOLVED,
+        lp_disposition: LP_BURNED,
     });
     a.bonding_curve.real_quote_reserves = 0;
     a.bonding_curve.real_token_reserves = 0;
     a.bonding_curve.virtual_quote_reserves = 0;
     a.bonding_curve.virtual_token_reserves = 0;
-    emit!(AmmV4Migrated {
+    emit!(BeamAmmV4Migration {
         mint: req.mint,
         pool: c.pool.amm,
         coin_amount: c.plan.coin_amount,
@@ -647,6 +665,7 @@ pub fn migrate_v4(ctx: Context<MigrateV4>, open_time: u64, max_pool_fee: u64, bu
     fund(ctx.accounts, &c, &before, &req)?;
     create_pool(ctx.accounts, &c, &req)?;
     verify(ctx.accounts, &c, &before, &req)?;
+    burn_lp(ctx.accounts, &c, &req)?;
 
     let unspent = budget.checked_sub(c.setup).ok_or(BeamError::SetupFundingOutOfBounds)?;
     refund(ctx.accounts, &req, unspent)?;

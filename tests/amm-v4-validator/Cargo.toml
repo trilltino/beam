@@ -18,8 +18,8 @@ spl-associated-token-account = { version = "=8.0.0", features = ["no-entrypoint"
 spl-token = { version = "=9.0.0", features = ["no-entrypoint"] }
 # Only for the live-validator feature.
 solana-rpc-client = { version = "=3.0.0", optional = true }
-solana-keypair = { version = "3", optional = true }
-solana-commitment-config = { version = "3", optional = true }
+solana-keypair = { version = "=3.1.2", optional = true }
+solana-commitment-config = { version = "=3.1.1", optional = true }
 
 [dev-dependencies]
 solana-account = "=3.0.0"

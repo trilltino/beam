@@ -1,4 +1,4 @@
-//! Wire constants shared by the migration tests; `idl_constants.rs` checks each against `sdk/idl/beam.json`.
+//! Wire constants shared by the migration tests.
 #![allow(dead_code)]
 
 /// `sha256("account:AmmV4Rights")[..8]`, the discriminator draft PR #49 reads.

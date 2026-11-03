@@ -564,12 +564,12 @@ async fn assert_migrated<R: Reader>(ctx: &mut R, fx: &Fx, before: &[Option<Accou
     assert_eq!(amount(&must(ctx, &fx.ray.pc_vault).await), pc);
     assert_quote_ready(ctx, fx, VAULT_TOKENS, pc).await;
 
-    // LP is issued to the migration PDA and stays there: no burn, no transfer.
+    // Raydium issues LP to the migration PDA; Beam burns that entire issuance.
     let (_, user_lp) = expected_lp(VAULT_TOKENS, pc, DECIMALS).expect("the planned pool issues LP");
     let lp_mint = Mint::unpack(&must(ctx, &fx.ray.lp_mint).await.data).expect("LP mint data");
-    assert_eq!(lp_mint.supply, user_lp);
+    assert_eq!(lp_mint.supply, 0, "the minted LP supply was burned");
     let lp = TokenAccount::unpack(&must(ctx, &fx.lp_account).await.data).expect("LP account data");
-    assert_eq!((lp.owner, lp.mint, lp.amount), (fx.authority, fx.ray.lp_mint, user_lp));
+    assert_eq!((lp.owner, lp.mint, lp.amount), (fx.authority, fx.ray.lp_mint, 0));
 
     // Raydium's fee lands once; the curve keeps rent, fee claims and the surplus.
     assert_eq!(amount(&must(ctx, &fx.ray.fee_destination).await), FEE_DEST_DONATION + CREATE_FEE);
@@ -601,7 +601,7 @@ async fn assert_migrated<R: Reader>(ctx: &mut R, fx: &Fx, before: &[Option<Accou
         + rent().minimum_balance(TokenAccount::LEN);
     let words: Vec<u64> = (0..7).map(|i| u64_at(&r.data, 104 + 8 * i)).collect();
     assert_eq!(words, vec![VAULT_TOKENS, pc, MIGRATION_FEE, CREATE_FEE, user_lp, spent, 0]);
-    assert_eq!(r.data[160], 0, "LP disposition is unresolved");
+    assert_eq!(r.data[160], 1, "Beam burned all LP it received");
     assert_rights_record(ctx, fx).await;
 }
 
@@ -863,8 +863,8 @@ async fn funding_for_a_higher_fee_cap_is_refunded_to_the_exact_cost() {
     assert!(paid <= budget() + receipt_rent + 100_000, "refund missing: {paid} lamports left the payer");
 }
 
-/// The CPI succeeds, then a later instruction fails: pool, fee, LP and curve
-/// transfers all roll back together.
+/// The CPI and LP burn succeed, then a later instruction fails: pool, fee, LP
+/// issuance and burn, and curve transfers all roll back together.
 #[tokio::test]
 async fn failure_after_a_successful_migration_rolls_back_the_pool() {
     let (mut ctx, fx) = enabled_context(Opts::standard(), CREATE_FEE).await;
