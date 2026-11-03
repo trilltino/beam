@@ -153,6 +153,7 @@ completion percentages or production approval.
 | Creator sharing and payout service | **Blocked** | Retained on-chain source has creator paths, but Beam still depends on inherited Pump fee configuration. No Beam-controlled payout integration is verified. |
 | Charity donations | **Mock draft; live use blocked** | [#14](https://github.com/shawkkkkk/beam/pull/14) provides a disabled local registry/provider mock. There is no authorized Donate.gg integration or real settlement. |
 | Callouts and livestreaming | **Mock drafts; live use blocked** | [#15](https://github.com/shawkkkkk/beam/pull/15) and [#21](https://github.com/shawkkkkk/beam/pull/21) test local moderation and lifecycle behavior; no production provider or playable live stream exists. |
+| Per-token discussion | **Local policy draft; live use blocked** | `backend/discussion/` tests opt-in, moderation, rate limits and unavailable tokens with synthetic adapters. It has no durable identity, storage, authenticated token feed or public UI. |
 
 See [implementation status](docs/STATUS.md), [feature matrix](docs/FEATURES.md)
 and the [dated PR dependency queue](docs/TASKS.md) for more detail.
