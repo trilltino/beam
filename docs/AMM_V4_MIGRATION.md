@@ -49,30 +49,35 @@ could graduate a token with a far-future open time: Raydium would create the poo
 waiting to open, nobody could swap, and the migration could not be redone because
 the receipt and pool already exist. Pass `0` (or the current time) to open at once.
 
-A migration uses about 300,000 compute units, around 136,000 of them in Raydium
-itself, so a client must request a limit above the 200,000 default.
+A migration measured 208,623 compute units on a validator (see "Measured cost"), just over the
+200,000 default, so a client must request a higher limit.
 
 ## What `migrate_amm_v4` does
 
-1. Checks the curve is complete with no real token reserves, is not Mayhem, quotes in native SOL,
-   and the mint is a classic SPL Token mint (a Token-2022 mint fails account validation).
+1. **Preflight** (nothing moves). Checks the curve is complete with no real token reserves, is not
+   Mayhem, quotes in native SOL, the mint is a classic SPL Token mint (a Token-2022 mint fails account
+   validation) with at most 18 decimals, and `open_time` is not in the future.
 2. Derives every Raydium account from the 19-account ABI and rejects any account whose key differs.
    The pool, LP mint, both vaults, target orders and the LP account must be uncreated.
-3. Plans the amounts from authenticated Beam state before anything moves:
+3. Plans the amounts from authenticated Beam state:
    all tokens in the curve vault, and `real_quote + post_complete_quote_in - pool_migration_fee`
    in SOL. Rent, creator and protocol fee claims and unrelated lamports on the curve are
-   protected by the same floor the CPMM candidate used.
-4. Moves `setup_budget` from the caller to the migration PDA, the planned tokens to its base
-   account, and the planned SOL into its WSOL account, then `SyncNative`. Existing balances in
-   those accounts are recorded first; donations are neither adopted nor swept.
-5. Calls Raydium `Initialize2` with the migration PDA as wallet, signing with `invoke_signed`.
-6. Re-reads the result and requires: pool owned by Raydium, 752 bytes, status `SwapOnly` or
-   `WaitingTrade`; both vaults owned by Raydium's authority with the planned mints and amounts;
-   the sources drained back to their prior balances; LP supply and the PDA's LP balance equal to
-   `isqrt(coin * pc) - 10^decimals`; Raydium's fee destination up by exactly the create-pool fee.
-7. Pays the inherited `pool_migration_fee` to `Global.withdraw_authority`, checks the curve still
-   covers its protected floor, refunds the caller's unspent setup, writes the receipt, zeroes the
-   curve's reserves and emits `BeamAmmV4Migration`.
+   protected by the same floor the CPMM candidate used. Bounds the setup budget (below).
+4. **Baseline.** Requires the migration PDA's base and WSOL accounts to be initialized, unfrozen,
+   delegate-free and close-authority-free, and records their balances: donations are neither adopted
+   nor swept.
+5. **Funding.** Moves `setup_budget` from the caller to the migration PDA, the planned tokens to its
+   base account, and the planned SOL into its WSOL account, then `SyncNative`.
+6. Calls Raydium `Initialize2` with the migration PDA as wallet, signing with `invoke_signed`. The 18
+   accounts other than the seed must be distinct keys.
+7. **Verification.** Decodes the new pool field by field (see "Pool verification and source policy"),
+   and requires both vaults to hold the planned amounts under Raydium's authority, the sources to be
+   back at their baselines, the LP supply and the PDA's LP balance to equal
+   `isqrt(coin * pc) - 10^decimals`, Raydium's fee destination up by exactly the create-pool fee, and
+   Raydium to have charged exactly the planned setup cost.
+8. Refunds the caller's unspent setup, pays the inherited `pool_migration_fee` to
+   `Global.withdraw_authority`, checks the curve still covers its protected floor, writes the rights
+   record and the receipt, zeroes the curve's reserves and emits `BeamAmmV4Migration`.
 
 An error at any step, including after the CPI, unwinds the whole transaction.
 
@@ -109,44 +114,78 @@ principal. The options, with Raydium's fee mechanics from the pinned source, are
 
 ## Evidence
 
-Beam is compiled to SBF and loaded next to the pinned Raydium Rust processor in one
-`solana-program-test` 3.0.0 bank, so a single transaction runs **Beam handler -> real pinned
-Raydium `Initialize2` -> SPL Token and associated-token programs -> Beam checks**. This is the
-test PR #38 and #63 could not do separately. Beam cannot run as a Rust processor there because
-Raydium at the pin needs `solana-program` 3.0 and Beam is on Anchor 0.31.1.
+These are different claims and are not interchangeable. Each row says what was run and what it
+does **not** show.
+
+| Level | Result | Where | Does not show |
+| --- | --- | --- | --- |
+| Raydium source correctness | Pool layout offsets, fee constants and status rules read from the pinned source and pinned by tests (`pool_layout.rs`, 3 tests) | local, CI | That any deployed binary matches that source |
+| Rust processor integration | 16 migration tests pass | local, CI | Anything about compiled bytecode |
+| Compiled-SBF integration | The same 16 pass with the pinned source compiled to SBF and loaded under the upgradeable loader (`RAYDIUM_SO`) | local, CI | The deployed binary |
+| Local validator | One migration plus a failed replay on `solana-test-validator` 4.4.0 with Beam and the SBF build loaded | CI (Linux only) | Mainnet state |
+| Deployed-program identity | `675kPX9M…` is executable under the upgradeable loader; program-data `A7ZG7By…`; last deployed slot 445763204; upgrade authority `FytDrVz…`, a single key, so Raydium can change the binary at any time (read-only RPC, 3 Nov 2026) | local script, CI dump | That the binary is unchanged since |
+| Deployed-binary behavior | The binary dumped from mainnet completes the same live migration on the validator (208,441 compute units) | CI, informational step | Real mainnet accounts: the Raydium config account and fixtures are synthetic |
+| Deployed-binary equivalence | **Not established.** The deployed ELF (308,601 bytes, SHA-256 `d4cee0cd…7b2c9f` with trailing padding trimmed) differs from the pinned build (288,752 bytes). No verified-build attestation was found or checked | read-only RPC | n/a |
+| Mainnet compatibility | **Not tested.** No mainnet transaction, funds or wallet were used | | |
+
+`solana-program-test` 3.0.0 rejects the mainnet binary before running any of it ("Program is not
+deployed"), even under the upgradeable loader. That is a limit of that test bank, not evidence of a
+behavioral difference: the 4.4.0 validator runs the same bytes.
 
 ```sh
 (cd programs/beam && cargo build-sbf --arch v0 --no-default-features --features no-idl,experimental-amm-v4)
 (cd programs/beam && cargo build-sbf --arch v0 --no-default-features --features no-idl --sbf-out-dir target/deploy-production)
 cd tests/amm-v4-validator
 cargo test --locked --features beam-sbf --test beam_migration -- --test-threads=1
+# the same suite against compiled Raydium:
+RAYDIUM_SO=/path/to/raydium_amm.so cargo test --locked --features beam-sbf --test beam_migration -- --test-threads=1
 ```
 
 `--no-default-features` selects the mainnet AMM v4 program id, which is what the pinned crate
 uses by default. `--arch v0` is required: `cargo-build-sbf` 4.4 defaults to SBPF v3, which the
-3.0.0 test runtime rejects with `UnsupportedProgramId`. The `beam-sbf` feature keeps the existing validator CI job from needing an SBF
-build.
+3.0.0 test runtime rejects with `UnsupportedProgramId`. The `beam-sbf` feature keeps the existing
+validator CI job from needing an SBF build.
 
-Thirteen tests pass locally, and `.github/workflows/beam-amm-v4-sbf.yml` runs the same builds and
-tests on a GitHub Linux runner (passed in a private fork). Cases covered: success with and without pre-existing source accounts and donations (exact vault,
-LP, fee, curve, refund and receipt values, including the exact setup rent Raydium charged);
-disabled config; replay; fee cap on both the caller and stored sides; setup funding one lamport
-under the exact cost and one over the accepted worst case; an open time in the future refused
-before anything moves; funding for a higher fee cap refunded
-down to the exact cost; a production-style build (no activation feature) refusing to enable or run
-migration; Token-2022 mint; pre-created pool; ten substituted accounts; and a later
-instruction failing after a successful migration. Each failure compares every touched account byte
-for byte against its state before the transaction. With the setup bounds, a caller can no longer
-make Raydium fail mid-CPI for lack of rent, and Raydium's other checks all pass for state Beam
-derived, so no test provokes an in-CPI Raydium failure; rollback after a completed CPI is covered.
+### What the 16 migration tests cover
 
-The suite also passes against Raydium compiled to SBF (`RAYDIUM_SO`, run locally). The live
-validator job in the same workflow builds Beam, builds Raydium at the pin, installs Agave
-`v4.4.0` after checking its SHA-256, and migrates on `solana-test-validator`, then checks that a
-replay fails and changes nothing.
+Success with and without pre-existing source accounts and donations (exact vault, LP, fee, curve,
+refund, receipt and rights values, and every field of the new pool); disabled config; replay; the fee
+cap on both the caller and stored sides; setup funding one lamport under the exact cost and one over
+the accepted worst case; funding for a higher fee cap refunded to the exact cost; an open time in the
+future; a mint with 19 or more decimals; frozen base and WSOL sources; a production-style build that
+cannot enable migration; a Token-2022 mint; a pre-created pool; a real third-party `Initialize2`
+followed by a fail-closed migration; ten substituted accounts; and a later instruction failing after a
+successful migration. Each failure compares every touched account byte for byte with its state before
+the transaction.
 
-`cargo check --locked --all-features` fails in `programs/beam` because of the inherited
-`anchor-debug` feature (`solana_program` unresolved). That is independent of this work.
+### Atomicity: where a failure can happen
+
+| Failure point | Reachable? | Evidence |
+| --- | --- | --- |
+| Before funding | Yes | Every refusal above leaves all 17 watched accounts byte-identical |
+| After partial funding | No | The causes (frozen or delegated sources, wrong balances, bad budget, bad accounts) are rejected in `preflight` and `baseline`, before any lamport or token moves |
+| During the Raydium CPI | No | With the bounds above no input makes Raydium fail; a pre-created pool is refused before funding |
+| After a successful CPI | Yes | `failure_after_a_successful_migration_rolls_back_the_pool` appends a failing instruction and checks the pool, receipt and every balance are gone |
+| During final settlement | No | The fee payout is bounded by the same floor `preflight` already proved |
+| Receipt creation | Yes | A replay fails at account validation with the pool and receipt untouched |
+
+Solana makes the whole transaction atomic, so the unreachable rows rest on that guarantee plus the
+checks that remove their causes, not on a test that provokes them.
+
+## Measured cost
+
+Measured on `solana-test-validator` 4.4.0 by simulating the transaction (a measurement, not an
+estimate), unless marked:
+
+| Quantity | Value |
+| --- | --- |
+| Compute units, whole transaction | 208,623 (default limit is 200,000, so a client must request more) |
+| Compute units, `solana-program-test` 3.0.0 bank | 299,763 (Raydium 135,823; associated-token program 20,389); the difference from the validator figure is not explained |
+| Raydium on the deployed binary | 208,441 total |
+| Transaction size | 1,100 bytes (limit 1,232) |
+| Instruction accounts | 27, plus the compute-budget program |
+| Raydium setup cost, exact (computed) | 54,962,800 lamports at a 25,000,000 create-pool fee; 29,962,800 of it rent |
+| Extra Beam rent, paid by the caller (computed) | receipt 2,011,440; rights record 2,345,520 |
 
 ## AMM v4 quote path
 
@@ -165,42 +204,86 @@ pools this instruction produces:
   the market seed), vaults owned by Raydium's authority with no delegate or close authority, and a
   fully backed WSOL vault. A pool migrated here satisfies all of them.
 - **Rights record, written by the migration.** #49's reader also requires an `AmmV4Rights` account
-  for the pool. `migrate_amm_v4` now creates it (`BeamAmmV4Rights`, paid by the caller) with the same
+  for the pool. `migrate_amm_v4` creates it (`BeamAmmV4Rights`, paid by the caller) with the same
   discriminator and bytes #49's `register` writes: pool, mint, market seed (the mint), the curve's
   creator as both creator and payout wallet, no donation selection, revision 0, not paused. A test
   compares the account byte for byte. When #49 lands, replace `BeamAmmV4Rights` with its
   `AmmV4Rights`; #49's `register` then fails for a migrated pool with account-already-in-use, which is
   intended. The layout follows #49 at head `32c661d` and must be re-checked if that PR changes.
 - **Valuation.** The reader uses spot vault reserves minus pending PnL. That is not a TWAP or oracle
-  and can be moved by one trade; it should not price anything an attacker can profit from
-  without a manipulation bound.
+  and can be moved by one trade; see [AMM_V4_RECONCILIATION.md](AMM_V4_RECONCILIATION.md).
+
+## Pool verification and source policy
+
+`verify_pool` decodes the new pool with `beam_amm_v4_pool_state.rs` and compares status, authority
+bump, both decimals, the eight fee words, pending PnL, open time, both vaults, both mints, the LP
+mint, the pool seed, the target-orders address, the absence of any OpenBook link, and the LP total
+(the user's LP plus the permanently locked `10^coin_decimals`). It then checks the target-orders
+account's owner and length. Reads are bounds-checked slices; there is no pointer cast and no
+indexing that can panic.
+
+Draft #29 and #34 check source and post-CPI balances for **exact equality**. That is stricter than
+this branch on purpose does not follow: anyone could donate one token unit to the migration PDA's
+token account and make every migration fail forever. Here donations are recorded in `baseline` and
+preserved, while the sources must still be initialized, unfrozen, delegate-free and
+close-authority-free (`InvalidMigrationSource`). #29 also found that Raydium's initializer overflows
+a `u64` for a mint with 19 or more decimals; that guard is adopted (`MAX_SAFE_MINT_DECIMALS`).
+#34's alias rule would reject the mint-as-seed design, because the seed and the coin mint are the
+same key; the check here exempts only that one position.
+
+## Pool-seed pre-emption
+
+The pool address is derived from the launch mint, which is public. Raydium's `Initialize2` is
+permissionless and treats the "market" account only as a PDA seed, so a third party can create the
+pool first. The test `a_third_party_can_create_the_pool_first_and_beam_then_fails_closed` does exactly
+that through the real processor, and Beam then refuses to migrate and moves nothing.
+
+- **What the attacker needs:** a little of the launch token (any amount whose pool would issue more
+  than the locked `10^decimals` LP), some SOL, Raydium's create-pool fee and the rent of the six
+  accounts (about 0.03 SOL in the fixture). They receive the LP, so the liquidity is theirs to
+  withdraw later; their net cost is mostly the fee.
+- **Effect:** availability, not theft. The curve keeps its tokens and SOL, but this instruction can
+  never graduate it, and the curve is complete so holders cannot sell there. There is no retry.
+- **Alternatives the pinned processor supports:** any public key works as the seed.
+  1. *A caller-supplied fresh seed*, recorded in the receipt and rights record (the rights record
+     already has a `market_seed` field and the #49 reader uses it). A retry after a pre-emption then
+     works. It is **not** front-running resistant: the seed is visible in the pending transaction, so
+     an attacker can copy it and land first, but each such attempt costs them the fee and rent and
+     the caller simply retries with a new seed, ideally through a private submission path.
+  2. *A reservation step on Beam's side* does not help: Raydium never consults Beam, so a Beam-side
+     reservation cannot stop a direct `Initialize2`.
+  3. *Adopting an existing pool* (depositing into the attacker's pool) is unsafe, because the attacker
+     chose its price.
+- **Status:** not implemented. Choosing a seed policy changes how a pool is discovered (from the
+  mint, or from the receipt), so it is a protocol decision. Until it is made the safe failure above
+  stands and the availability risk is accepted and documented.
+
+## Raydium CPI crate decision
+
+Beam keeps its own source-pinned adapter (`beam_amm_v4.rs`) and does not depend on
+`raydium-io/raydium-cpi`. `master` of that repository pins Anchor 1.0.2. Its `anchor-0.31.1` branch
+matches Beam's Anchor version, but its `Initialize2` context is the older 21-account form with
+OpenBook placeholder accounts (`amm_open_orders`, `market_program`), not the 19-account form Beam sends
+and the pinned processor accepts. Beam would still have to derive and validate every address and
+sign for the migration PDA itself, so the crate would add a git dependency and OpenBook accounts for no
+correctness gain. Revisit if that crate gains a 19-account `Initialize2`.
 
 ## What this does not establish
 
-- The tests run Raydium's source at the pin, both as the Rust processor and (with `RAYDIUM_SO`)
-  as that source compiled to SBF, and Beam as an SBF build of this source. A live
-  `solana-test-validator` run exists as the `live-validator` feature and a Linux CI job. That job
-  is the first place it runs: it has not been executed on this machine, because Anza ships the
-  validator for Linux only. None of this is the deployed mainnet Raydium binary, so
-  deployed-program equivalence is still not established.
-- Post-CPI pool checks read the pool status and vault and LP accounts, not the whole packed
-  `AmmInfo`. Draft #34's source-pinned decoder is the better long-term check.
-- The Beam IDL is not regenerated. The instructions are built from discriminators in the test.
+- Deployed-binary equivalence and mainnet compatibility; see the evidence table.
+- The `solana-program-test` figure for compute units differs from the validator's and is unexplained.
 - Token-2022 launches cannot graduate. AMM v4 rejects those mints; they need a separate plan.
 - Raydium describes AMM v4 as legacy for new pools. The venue is the maintainer's selection and
   was not changed here; reaffirm it before activation.
+- `cargo check --locked --all-features` fails in `programs/beam` because of the inherited
+  `anchor-debug` feature; that is independent of this work.
 
 ## Open decisions and risks
 
-1. **LP custody and fee rights.** See above.
+1. **LP custody and fee rights.** See [LP_CUSTODY_DECISION.md](LP_CUSTODY_DECISION.md).
 2. **Fee funding.** The instruction keeps the inherited migration fee and recipient. How the
    42/5/3 allocation, creator funding and Raydium's create-pool fee relate is undecided.
-3. **AMM seed is front-runnable.** The mint is the seed Raydium uses for the pool address, which
-   keeps the pool deterministic. But `Initialize2` is permissionless and the seed is public:
-   anyone holding a little of the token can create the pool for that seed first, at any price,
-   and graduation then fails closed (tested) with no way to retry. A fresh caller-supplied seed
-   recorded in the receipt avoids this, at the cost of a non-deterministic pool address. Pick one
-   before activation.
+3. **Pool-seed policy.** See "Pool-seed pre-emption". Pick one before activation.
 4. **Rights record contents.** Creator payout defaults to the curve creator and donation selection
    starts empty, copied from #49's `register`. Those choices are that PR's proposal, not approved.
 5. **Curve state.** Reserves are zeroed after migration, as the CPMM candidate did. A dedicated
