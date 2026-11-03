@@ -51,6 +51,9 @@ jobs:
       - name: Build Beam to SBF (local-test)
         working-directory: programs/beam
         run: cargo build-sbf --arch v0 --no-default-features --features no-idl,experimental-amm-v4
+      - name: Build Beam to SBF (production-style, for the activation-gate test)
+        working-directory: programs/beam
+        run: cargo build-sbf --arch v0 --no-default-features --features no-idl --sbf-out-dir target/deploy-production
       - name: Build the pinned Raydium AMM v4 program to SBF
         run: |
           git clone --no-checkout https://github.com/raydium-io/raydium-amm "$RUNNER_TEMP/raydium-amm"
