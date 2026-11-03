@@ -392,9 +392,12 @@ pub fn execute_migration(ctx: Context<MigrateAmmV4>, open_time: u64, max_create_
     // Solana rejects a CPI while the caller's accounts are unbalanced, and only the
     // CPI's own accounts are synced. The curve is the other side of the lamport move
     // above, so it rides along; SyncNative reads one account and ignores the rest.
+    // The newer token program reads the second SyncNative account as the Rent sysvar and rejects
+    // anything else, so Rent goes second and the curve third; the older program ignores extras.
     let mut sync = token::spl_token::instruction::sync_native(&token::ID, &wsol_info.key())?;
+    sync.accounts.push(AccountMeta::new_readonly(a.rent.key(), false));
     sync.accounts.push(AccountMeta::new(curve_info.key(), false));
-    invoke(&sync, &[wsol_info.clone(), curve_info.clone(), a.token_program.to_account_info()])?;
+    invoke(&sync, &[wsol_info.clone(), a.rent.to_account_info(), curve_info.clone(), a.token_program.to_account_info()])?;
     let wsol_after_sync = token_state(&wsol_info)?.amount;
     require!(wsol_after_sync == wsol_spendable_before.checked_add(plan.pc_amount).ok_or(PumpError::Overflow)?, BeamError::InvalidMigrationBalance);
     require!(token_state(&a.authority_base.to_account_info())?.amount == base_before.checked_add(plan.coin_amount).ok_or(PumpError::Overflow)?, BeamError::InvalidMigrationBalance);

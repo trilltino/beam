@@ -70,7 +70,10 @@ An error at any step, including after the CPI, unwinds the whole transaction.
 Lamports move directly (not by CPI) between the curve and other accounts. Solana rejects a CPI
 while the caller's accounts are unbalanced, so the curve rides along on the `SyncNative` CPI
 that follows its payout into the WSOL account, and the migration fee is paid only after the last
-CPI. Keep that ordering when editing the handler.
+CPI. Keep that ordering when editing the handler. The `SyncNative` accounts are WSOL, then the Rent
+sysvar, then the curve: the newer token program that Agave 4.x ships reads the second account as
+Rent and fails with `InvalidArgument` on anything else. The program-test bank's older token program
+ignores extras, so only the live validator exposed this.
 
 ### PDAs
 
