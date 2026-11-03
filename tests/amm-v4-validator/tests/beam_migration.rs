@@ -32,7 +32,7 @@ use spl_token::state::{Account as TokenAccount, AccountState, Mint};
 
 const BEAM: Pubkey = pubkey!("GdaQ7RHbGKGEL5Px66tQP78S67XcgxYAzFUwja71qSJP");
 const SYSTEM: Pubkey = pubkey!("11111111111111111111111111111111");
-const BPF_LOADER_2: Pubkey = pubkey!("BPFLoader2111111111111111111111111111111111");
+const UPGRADEABLE_LOADER: Pubkey = pubkey!("BPFLoaderUpgradeab1e11111111111111111111111");
 const CURVE_CREATOR: Pubkey = pubkey!("Stake11111111111111111111111111111111111111");
 /// `sha256("account:AmmV4Rights")[..8]`, the discriminator draft PR #49 reads.
 const DISC_RIGHTS: [u8; 8] = [88, 155, 79, 159, 221, 232, 159, 98];
@@ -276,10 +276,23 @@ fn build(opts: Opts) -> (ProgramTest, Fx) {
     // the same source, every test here runs against the compiled program instead (see the header).
     match std::env::var("RAYDIUM_SO") {
         Ok(path) => {
+            // Loaded the way mainnet runs it: an upgradeable-loader program account that points at a
+            // program-data account holding a 45-byte header (tag 3, slot, authority option) and the ELF.
             let elf = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read RAYDIUM_SO {path}: {e}"));
+            let programdata = Pubkey::find_program_address(&[raydium_amm::id().as_ref()], &UPGRADEABLE_LOADER).0;
+            let mut program_state = 2u32.to_le_bytes().to_vec();
+            program_state.extend_from_slice(programdata.as_ref());
+            let mut data_state = 3u32.to_le_bytes().to_vec();
+            data_state.extend_from_slice(&0u64.to_le_bytes());
+            data_state.resize(45, 0);
+            data_state.extend_from_slice(&elf);
             pt.add_account(
                 raydium_amm::id(),
-                Account { lamports: rent().minimum_balance(elf.len()), data: elf, owner: BPF_LOADER_2, executable: true, rent_epoch: 0 },
+                Account { lamports: rent().minimum_balance(program_state.len()), data: program_state, owner: UPGRADEABLE_LOADER, executable: true, rent_epoch: 0 },
+            );
+            pt.add_account(
+                programdata,
+                Account { lamports: rent().minimum_balance(data_state.len()), data: data_state, owner: UPGRADEABLE_LOADER, executable: false, rent_epoch: 0 },
             );
         }
         Err(_) => pt.add_program("raydium_amm", raydium_amm::id(), processor!(process_raydium)),
@@ -939,12 +952,26 @@ mod live {
         Instruction { program_id: pubkey!("ComputeBudget111111111111111111111111111111"), accounts: vec![], data }
     }
 
-    async fn send_tx(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction]) -> Result<(), String> {
+    async fn signed_tx(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction]) -> Result<Transaction, String> {
         let blockhash = rpc.get_latest_blockhash().await.map_err(|e| format!("{e:?}"))?;
         let mut all = vec![compute_budget(1_400_000)];
         all.extend_from_slice(ixs);
-        let tx = Transaction::new_signed_with_payer(&all, Some(&payer.pubkey()), &[payer], blockhash);
+        Ok(Transaction::new_signed_with_payer(&all, Some(&payer.pubkey()), &[payer], blockhash))
+    }
+
+    async fn send_tx(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction]) -> Result<(), String> {
+        let tx = signed_tx(rpc, payer, ixs).await?;
         rpc.send_and_confirm_transaction(&tx).await.map(|_| ()).map_err(|e| format!("{e:?}"))
+    }
+
+    /// Simulates the transaction and returns the compute units it uses and its serialized size.
+    async fn measure(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction]) -> (u64, usize) {
+        let tx = signed_tx(rpc, payer, ixs).await.expect("a signed transaction");
+        // One-byte signature count, then 64 bytes per signature, then the message.
+        let bytes = tx.message.serialize().len() + 1 + 64 * tx.signatures.len();
+        let sim = rpc.simulate_transaction(&tx).await.expect("the validator simulates the transaction").value;
+        assert!(sim.err.is_none(), "simulation failed: {:?} {:?}", sim.err, sim.logs);
+        (sim.units_consumed.expect("the simulation reports compute units"), bytes)
     }
 
     #[tokio::test]
@@ -973,7 +1000,8 @@ mod live {
             .arg(dir.join("ledger"))
             .args(["--rpc-port", &rpc_port.to_string(), "--faucet-port", &faucet_port.to_string()])
             .args(["--bpf-program", &BEAM.to_string(), &beam_so])
-            .args(["--bpf-program", &raydium_amm::id().to_string(), &raydium_so]);
+            // Raydium is upgradeable on mainnet, so load it under the upgradeable loader here too.
+            .args(["--upgradeable-program", &raydium_amm::id().to_string(), &raydium_so, "none"]);
         for (key, account) in &accounts {
             let file = write_account(&accounts_dir, key, account);
             cmd.arg("--account").arg(key.to_string()).arg(file);
@@ -1008,6 +1036,12 @@ mod live {
         send_tx(&rpc, &payer, &[enable_ix(&fx, &key, true)]).await.expect("the transaction succeeds");
 
         let before = snapshot(&mut rpc, &fx).await;
+        // Measured on the live validator: a client must request this much compute, and the
+        // transaction must fit the 1232-byte packet limit.
+        let (units, bytes) = measure(&rpc, &payer, &[migrate_ix(&fx, &key, CREATE_FEE, budget())]).await;
+        println!("MEASURED migrate_amm_v4: {units} compute units, {bytes} byte transaction");
+        assert!(units > 200_000, "the default 200000 limit must not suffice, or the docs are wrong: {units}");
+        assert!(units < 1_400_000 && bytes <= 1232, "{units} units, {bytes} bytes");
         send_tx(&rpc, &payer, &[migrate_ix(&fx, &key, CREATE_FEE, budget())]).await.expect("migration on the live validator");
         assert_migrated(&mut rpc, &fx, &before).await;
 

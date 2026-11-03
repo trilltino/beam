@@ -82,3 +82,28 @@ jobs:
         run: |
           solana-test-validator --version
           cargo test --locked --features live-validator --test beam_migration live:: -- --test-threads=1 --nocapture
+      # Informational: the binary Raydium actually runs on mainnet, read over public RPC. A network
+      # or loader problem here does not fail the job, but the outcome is written to the summary.
+      - name: Dump the deployed Raydium program (read-only)
+        id: mainnet-dump
+        continue-on-error: true
+        run: |
+          solana program dump -u https://api.mainnet-beta.solana.com 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 "$RUNNER_TEMP/raydium-mainnet.so"
+          sha256sum "$RUNNER_TEMP/raydium-mainnet.so"
+      - name: Live migration against the deployed mainnet binary
+        id: mainnet-live
+        if: steps.mainnet-dump.outcome == 'success'
+        continue-on-error: true
+        working-directory: tests/amm-v4-validator
+        env:
+          RAYDIUM_SO: ${{ runner.temp }}/raydium-mainnet.so
+        run: cargo test --locked --features live-validator --test beam_migration live::live_validator -- --test-threads=1 --nocapture
+      - name: Report the deployed-binary result
+        if: always()
+        run: |
+          {
+            echo "### Deployed Raydium binary (informational)"
+            echo "- dump from mainnet: ${{ steps.mainnet-dump.outcome }}"
+            echo "- live migration against it: ${{ steps.mainnet-live.outcome }}"
+            echo "A pinned-source build is not the deployed binary; only this step exercises the latter."
+          } >> "$GITHUB_STEP_SUMMARY"
