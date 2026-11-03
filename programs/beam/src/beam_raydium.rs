@@ -192,7 +192,7 @@ fn checked_move(from: &AccountInfo, to: &AccountInfo, amount: u64) -> Result<()>
 /// Post-completion buys can add quote to the curve after real reserves stop
 /// changing. Include that quote in the Raydium pool, as the retained Pump
 /// migration does, while charging the migration fee only once.
-fn migration_quote(real_quote: u64, post_complete_quote_in: u64, migration_fee: u64) -> Result<(u64, u64)> {
+pub(crate) fn migration_quote(real_quote: u64, post_complete_quote_in: u64, migration_fee: u64) -> Result<(u64, u64)> {
     let total = real_quote.checked_add(post_complete_quote_in).ok_or(PumpError::Overflow)?;
     let pool_quote = total.checked_sub(migration_fee).ok_or(BeamError::InvalidMigrationBalance)?;
     require!(pool_quote > 0, BeamError::InvalidMigrationBalance);
@@ -201,7 +201,7 @@ fn migration_quote(real_quote: u64, post_complete_quote_in: u64, migration_fee: 
 
 /// Fee counters are separate claims on the curve's lamports, not deductions
 /// from its recorded liquidity reserves. Extra lamports are left in place.
-fn protected_curve_floor(curve_lamports: u64, rent: u64, creator_fee: u64, protocol_fees: u64, owned_quote: u64) -> Result<u64> {
+pub(crate) fn protected_curve_floor(curve_lamports: u64, rent: u64, creator_fee: u64, protocol_fees: u64, owned_quote: u64) -> Result<u64> {
     let floor = rent.checked_add(creator_fee).and_then(|v| v.checked_add(protocol_fees)).ok_or(PumpError::Overflow)?;
     let required = floor.checked_add(owned_quote).ok_or(PumpError::Overflow)?;
     require!(curve_lamports >= required, BeamError::InvalidMigrationBalance);

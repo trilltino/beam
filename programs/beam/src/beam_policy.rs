@@ -29,6 +29,10 @@ pub enum BeamError {
     UnsupportedMint,
     #[msg("Raydium returned unexpected pool, vault, or LP state")]
     InvalidMigrationResult,
+    #[msg("Raydium create-pool fee exceeds the Beam-configured cap")]
+    CreatePoolFeeExceedsCap,
+    #[msg("Setup funding is outside the exact bounds for Raydium's create-pool fee and account rent")]
+    SetupFundingOutOfBounds,
 }
 
 #[cfg(test)]

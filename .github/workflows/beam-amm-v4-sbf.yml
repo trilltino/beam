@@ -1,0 +1,30 @@
+name: Beam AMM v4 SBF end-to-end
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  beam-to-raydium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+      # Pinned to the version the local runs used; it downloads Solana platform-tools v1.57 on first use.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-build-sbf
+            ~/.cache/solana
+          key: cargo-build-sbf-4.4.0-platform-tools-1.57
+      - run: command -v cargo-build-sbf || cargo install cargo-build-sbf --version 4.4.0 --locked
+      # Local-test build: the activation feature is on, so the tests can run a migration.
+      - name: Build Beam to SBF (local-test)
+        working-directory: programs/beam
+        run: cargo build-sbf --arch v0 --no-default-features --features no-idl,experimental-amm-v4
+      # Release-style build: no activation feature, so migration can never be enabled.
+      - name: Build Beam to SBF (production-style)
+        working-directory: programs/beam
+        run: cargo build-sbf --arch v0 --no-default-features --features no-idl --sbf-out-dir target/deploy-production
+      - name: Beam to pinned Raydium AMM v4, end to end
+        working-directory: tests/amm-v4-validator
+        run: cargo test --locked --features beam-sbf --test beam_migration -- --test-threads=1

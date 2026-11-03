@@ -3,7 +3,11 @@ name = "beam-amm-v4-validator"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Local-validator CPI checks for the pinned Raydium AMM v4 Initialize2 path. Not a Beam migration entrypoint."
+description = "Local-validator CPI checks for the pinned Raydium AMM v4 Initialize2 path. The default tests do not call a Beam entrypoint; the beam-sbf feature adds Beam-to-Raydium tests against a prebuilt SBF binary."
+
+[features]
+# Compiles the Beam-to-Raydium tests, which need a prebuilt Beam SBF binary.
+beam-sbf = []
 
 [dependencies]
 raydium_amm = { git = "https://github.com/raydium-io/raydium-amm", rev = "91739d8d9f5cf347e0ce14ebe4d2bb7069fb31b6", default-features = false, features = ["no-entrypoint"] }
