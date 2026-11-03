@@ -5,8 +5,8 @@ is Beam's first executable AMM v4 graduation path. It is **disabled in every
 production build**. It exists so the Beam-to-Raydium path can be exercised
 against the pinned Raydium processor while the product decisions below stay open.
 
-This page covers one bounded lane. It does not choose LP custody, fee funding or
-a Token-2022 plan, and it does not touch `upstream/`. Draft PRs #29, #30, #33,
+This page covers one bounded lane. LP issued to Beam is burned after verification;
+the creator payout rate and Token-2022 plan remain open. It does not touch `upstream/`. Draft PRs #29, #30, #33,
 #34, #59 and #63 build funding, settlement and snapshot helpers for the same
 destination; this instruction deliberately carries its own small plan and
 post-CPI checks so it can be reviewed alone. Reconcile with that stack before
@@ -49,8 +49,9 @@ could graduate a token with a far-future open time: Raydium would create the poo
 waiting to open, nobody could swap, and the migration could not be redone because
 the receipt and pool already exist. Pass `0` (or the current time) to open at once.
 
-A migration measured 208,623 compute units on a validator (see "Measured cost"), just over the
-200,000 default, so a client must request a higher limit.
+Before the LP burn was added, a migration measured 208,623 compute units on a validator
+(see "Measured cost"). The burn increases that cost; a client must request a measured,
+reviewed limit above the 200,000 default.
 
 ## What `migrate_amm_v4` does
 
@@ -75,7 +76,9 @@ A migration measured 208,623 compute units on a validator (see "Measured cost"),
    back at their baselines, the LP supply and the PDA's LP balance to equal
    `isqrt(coin * pc) - 10^decimals`, Raydium's fee destination up by exactly the create-pool fee, and
    Raydium to have charged exactly the planned setup cost.
-8. Refunds the caller's unspent setup, pays the inherited `pool_migration_fee` to
+8. Burns exactly the LP issued to the migration PDA, then verifies the mint supply and PDA
+   LP balance are zero. A failed burn rolls back pool creation and funding.
+9. Refunds the caller's unspent setup, pays the inherited `pool_migration_fee` to
    `Global.withdraw_authority`, checks the curve still covers its protected floor, writes the rights
    record and the receipt, zeroes the curve's reserves and emits `BeamAmmV4Migration`.
 
@@ -104,13 +107,15 @@ and `lp_disposition`.
 
 ## LP tokens
 
-The LP tokens stay in the migration PDA's associated token account and
-`receipt.lp_disposition` is `0` (held, unresolved). Nothing burns, locks or transfers them, and
-no Beam instruction can move them. That is not an LP custody design. It is the least committing
-state while the maintainer decides between burn, lock and retain. Holding them keeps Beam's
-fee-claim option open but also means that, until a release path exists, nobody can withdraw
-principal. The options, with Raydium's fee mechanics from the pinned source, are in
-[LP_CUSTODY_DECISION.md](LP_CUSTODY_DECISION.md); the choice is the owner's.
+The maintainer chose the pre-PumpSwap Pump.fun pattern: burn the LP minted to Beam
+at graduation. The migration PDA receives the LP from Raydium, Beam verifies the exact
+amount, then burns it in the same transaction. `receipt.lp_amount` records the issued
+amount and `receipt.lp_disposition` is `1` (burned). The PDA's LP account and the LP
+mint supply are zero after the burn. Raydium's unminted minimum LP remains reflected
+in its pool accounting. Initial liquidity cannot be withdrawn through the burned
+position, and Beam has no ongoing claim to that position's AMM v4 LP fees. Creator
+payouts, community distributions and buybacks after graduation therefore need a
+separately approved, actually collected source. See [the decision record](LP_CUSTODY_DECISION.md).
 
 ## Evidence
 
@@ -120,11 +125,11 @@ does **not** show.
 | Level | Result | Where | Does not show |
 | --- | --- | --- | --- |
 | Raydium source correctness | Pool layout offsets, fee constants and status rules read from the pinned source and pinned by tests (`pool_layout.rs`, 3 tests) | local, CI | That any deployed binary matches that source |
-| Rust processor integration | 19 migration tests pass | local, CI | Anything about compiled bytecode |
-| Compiled-SBF integration | The same 19 pass with the pinned source compiled to SBF and loaded under the upgradeable loader (`RAYDIUM_SO`) | local, CI | The deployed binary |
-| Local validator | One migration plus a failed replay on `solana-test-validator` 4.4.0 with Beam and the SBF build loaded | CI (Linux only) | Mainnet state |
+| Rust processor integration | 19 migration tests passed before the LP burn; rerun on this head | prior PR #68 local, CI | The burn or compiled bytecode |
+| Compiled-SBF integration | The same 19 passed before the LP burn with the pinned source compiled to SBF (`RAYDIUM_SO`); rerun on this head | prior PR #68 local, CI | The burn or deployed binary |
+| Local validator | One migration and failed replay passed before the LP burn; rerun on this head | prior PR #68 CI (Linux only) | The burn or mainnet state |
 | Deployed-program identity | `675kPX9M…` is executable under the upgradeable loader; program-data `A7ZG7By…`; last deployed slot 445763204; upgrade authority `FytDrVz…`, a single key, so Raydium can change the binary at any time (read-only RPC, 3 Nov 2026) | local script, CI dump | That the binary is unchanged since |
-| Deployed-binary behavior | The binary dumped from mainnet completes the same live migration on the validator (208,441 compute units) | CI, informational step | Real mainnet accounts: the Raydium config account and fixtures are synthetic |
+| Deployed-binary behavior | Before the LP burn, the binary dumped from mainnet completed the same live migration on the validator (208,441 compute units); rerun on this head | prior PR #68 CI, informational step | The burn or real mainnet accounts: Raydium config and fixtures are synthetic |
 | Deployed-binary equivalence | **Not established.** The deployed ELF (308,601 bytes, SHA-256 `d4cee0cd…7b2c9f` with trailing padding trimmed) differs from the pinned build (288,752 bytes). No verified-build attestation was found or checked | read-only RPC | n/a |
 | Mainnet compatibility | **Not tested.** No mainnet transaction, funds or wallet were used | | |
 
@@ -180,8 +185,9 @@ checks that remove their causes, not on a test that provokes them.
 
 ## Measured cost
 
-Measured on `solana-test-validator` 4.4.0 by simulating the transaction (a measurement, not an
-estimate), unless marked:
+Measured on PR #68 before the LP burn, on `solana-test-validator` 4.4.0 by simulating
+the transaction (a measurement, not an estimate), unless marked. **These compute figures
+are stale for this head and must be refreshed from the hosted validator run.**
 
 | Quantity | Value |
 | --- | --- |
@@ -286,9 +292,12 @@ correctness gain. Revisit if that crate gains a 19-account `Initialize2`.
 
 ## Open decisions and risks
 
-1. **LP custody and fee rights.** See [LP_CUSTODY_DECISION.md](LP_CUSTODY_DECISION.md).
-2. **Fee funding.** The instruction keeps the inherited migration fee and recipient. How the
-   42/5/3 allocation, creator funding and Raydium's create-pool fee relate is undecided.
+1. **No post-graduation LP fee claim.** The burned position cannot fund recurring payouts;
+   define another source before promising any. See [LP_CUSTODY_DECISION.md](LP_CUSTODY_DECISION.md).
+2. **Fee routing.** The owner chose creator payouts from the 42-bps community share.
+   The creator rate and its remaining community distribution are unset. The instruction
+   keeps the inherited migration fee and recipient; reconcile that fee and Raydium's
+   create-pool fee before activation.
 3. **Pool-seed policy.** See "Pool-seed pre-emption". Pick one before activation.
 4. **Rights record contents.** Creator payout defaults to the curve creator and donation selection
    starts empty, copied from #49's `register`. Those choices are that PR's proposal, not approved.

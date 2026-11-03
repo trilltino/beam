@@ -1,7 +1,7 @@
 # LP custody and fee rights: decision record
 
-**Status: engineering complete for the gated state; the policy needs the maintainer's confirmation.**
-Nothing here selects a scheme. `migrate_amm_v4` stays disabled in every production build.
+**Status: owner chose permanent LP burn on 3 November 2026; this implementation is a draft.**
+`migrate_amm_v4` stays disabled in every production build.
 
 ## Where the decision stands
 
@@ -9,25 +9,23 @@ Nothing here selects a scheme. `migrate_amm_v4` stays disabled in every producti
 | --- | --- | --- |
 | `AGENTS.md` on `main` | "Principal custody and fee rights remain unresolved." | Merged |
 | Draft PR #41 (`shawkkkkk`, head `aec9660`, open, not merged) | "LP is locked permanently. A locked position is not a recurring fee claim." Creators, operators and keepers have no authority to withdraw liquidity principal. Any post-graduation Beam fee is unset. Its body lists "LP locked permanently" under "Decided policy stays as written". | **Draft only** |
+| Owner direction, 3 November 2026 | Use what Pump.fun had before its move to PumpSwap. [Contemporaneous 2024 research](https://assets.ctfassets.net/i0qyt2j9snzb/45tD8g3D9YbHpJjIV8pFBs/da3fc7315d1f611d190eedcfb439705f/Pump.fun_-_Memecoin_Madness.pdf) describes Raydium graduation with the LP token burned. | **Selected: burn all LP issued to Beam** |
 
-The two disagree. A statement in an unmerged draft is not a reviewed decision, and `AGENTS.md` on
-`main` says the question is open, so this record treats #41 as the **documented direction awaiting
-confirmation**, not as approval. If #41 merges as written, the "permanent lock, no withdrawal" row
-below is the chosen policy and the consequences listed for it apply.
+The owner's later direction resolves the custody choice. PR #41's permanent-lock wording
+should be made precise before merge: the initial Beam-received LP is burned, so it gives
+Beam no ongoing LP fee claim. This is a historical-pattern choice, not proof that Beam's
+liquidity will have the same depth or market behavior.
 
 ## What the code does today
 
-- The LP tokens go to the migration PDA's associated token account.
-  `BeamAmmV4Receipt::lp_disposition` is `0`, "held, unresolved".
-- **No instruction can move them.** `nothing_in_the_program_can_move_the_migration_lp`
-  (`programs/beam/tests/idl_compatibility.rs`, added with the IDL pull request) fails if any instruction other than the migration
-  and the fail-closed CPMM one names the migration PDA or its token accounts, if any module other
-  than the migration module signs with the PDA's seeds, if the PDA signs in more than the two
-  places it does today (Raydium's `Initialize2` and the lamport refund), or if the migration module
-  calls a token burn, close, authority-change, approve or plain transfer.
-- That makes the current state a lock, but **only as permanent as the program's upgrade authority**:
-  an upgradeable Beam program could be upgraded to add a withdrawal route. A burn does not depend on
-  that. "Permanent" should not be promised on the strength of the PDA alone.
+- The LP tokens go to the migration PDA's associated token account, are verified against
+  the exact expected Raydium issuance, and are burned before settlement finishes.
+  `BeamAmmV4Receipt::lp_disposition` is `1`, "burned".
+- The handler checks that the LP mint supply and PDA LP balance are zero. The same
+  transaction rolls back if the burn or any later step fails. No upgrade to Beam can
+  recover those burned LP tokens.
+- The separate IDL draft's immovability test must be updated before integration: it
+  currently forbids the token burn this decision requires.
 
 ## Facts from the pinned Raydium source (raydium-amm 91739d8)
 
@@ -66,31 +64,30 @@ claimable LP is `held * (1 - g0 / g_now)` rounded down, where `g0` is recorded a
 Redeeming returns both assets in the pool's current ratio. Whether the recipient may receive that
 mix, and how it relates to the 42/5/3 split and creator funding, is the open decision.
 
-Compute and account costs for B, C and D are **estimates** until built; only the migration itself
-(208,623 compute units, 1,100 bytes) has been measured. A burn is a single token CPI, in line with
-the few thousand units the token program used in the measured migration.
+Compute and account costs for B, C and D are **estimates** until built. Before the burn,
+the migration measured 208,623 compute units and 1,100 transaction bytes. The burn adds
+a token-program CPI, so the new exact compute cost needs a validator measurement on this head.
 
 ## Decisions the maintainer must make
 
 | Decision | Candidate in draft #41 | Approved? |
 | --- | --- | --- |
-| LP custody model | Locked permanently | No reviewed decision |
-| Principal withdrawal policy | None | No reviewed decision |
-| LP value / fee beneficiaries | None; post-graduation Beam fee unset | No reviewed decision |
-| Fee claim or redemption authority | None | No reviewed decision |
-| Lock duration | Permanent | No reviewed decision |
+| LP custody model | Locked permanently | **Burn all Beam-received LP** |
+| Principal withdrawal policy | None | **No withdrawal from the burned position** |
+| LP value / fee beneficiaries | None; post-graduation Beam fee unset | **No LP fee claim** |
+| Fee claim or redemption authority | None | **None for the burned position** |
+| Lock duration | Permanent | **Permanent burn** |
 | Community distribution policy | Unset | No reviewed decision |
-| Creator payout funding | From the 42 bps community share (pre-graduation fees) | Not about LP |
+| Creator payout funding | From the 42 bps community share (pre-graduation fees) | **Owner confirmed; rate unset** |
 | Migration cost allocation | Today the caller pays the setup budget | No reviewed decision |
 
-## Recommendation, conditional
+## Consequence of the selected burn
 
-If the intended policy is the one in #41, **burning the LP (A) is the sturdier way to deliver it**:
-it needs no key, no upgrade-authority promise and no keeper, and it cannot be reversed by a later
-program upgrade. Choose B instead only if the maintainer wants a path to fund buybacks or
-distributions from LP growth, accepting the extra code, the recipient decision and the upgrade-authority
-exposure. C is a rug-pull risk and sits badly with the repo's goal of transparent risk. D needs a
-lock length nobody has proposed.
+The burn needs no withdrawal key, upgrade-authority promise or keeper, and it cannot be
+reversed by a later Beam program upgrade. It also removes the initial position's fee claim.
+Post-graduation creator payouts, community distributions and buybacks need a different
+approved and actually collected source; neither Raydium's pool fee nor the burned LP is
+spendable Beam revenue.
 
 This is an engineering judgement about trust assumptions. It is not market evidence: `AGENTS.md`
 asks for comparable depth, slippage and post-graduation data before any claim that a scheme preserves
@@ -98,9 +95,9 @@ liquidity or a chart, and none has been gathered.
 
 ## Consequences once a choice is approved
 
-- **A:** a burn step after verification, `lp_disposition = 1`, tests for the exact burned amount, the
-  supply decrease, rollback, and that nothing remains movable; the lock-immovability test is replaced
-  by a burn test. Small.
+- **A, selected in this draft:** a burn step after verification, `lp_disposition = 1`, tests for
+  the zero supply and balance, and rollback. Update the separate IDL draft's lock-immovability
+  test before combining branches.
 - **Permanent lock without burning:** no code change except naming the disposition and keeping the
   immovability test; the upgrade-authority caveat must be stated wherever "permanent" is claimed.
 - **B, C, D:** new custody state, a Raydium `Withdraw` CPI tested against real deposits and

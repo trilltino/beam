@@ -4,9 +4,9 @@
 //! the 19-account `Initialize2` path (see `beam_amm_v4`). The superseded CPMM
 //! adapter in `beam_raydium` is not used here.
 //!
-//! LP tokens are received by the migration-authority PDA and stay there. This
-//! module never burns, transfers or locks them: LP custody and fee rights are an
-//! unresolved product decision, and no Beam instruction can move them yet.
+//! Raydium issues LP to the migration-authority PDA. Beam verifies the exact
+//! issuance and burns all LP it received in the same migration transaction.
+//! The initial pool liquidity cannot be withdrawn or used to claim LP fees.
 //!
 //! # Trust model
 //!
@@ -36,7 +36,7 @@ use anchor_lang::solana_program::{
 };
 use anchor_spl::{
     associated_token::AssociatedToken,
-    token::{self, Mint, Token, TokenAccount, TransferChecked},
+    token::{self, Burn, Mint, Token, TokenAccount, TransferChecked},
 };
 
 /// Seed of the singleton [`BeamAmmV4Config`] account.
@@ -56,8 +56,8 @@ const TARGET_ORDERS_LEN: usize = 2208;
 pub const MAX_SAFE_MINT_DECIMALS: u8 = 18;
 /// Position of the pool-seed ("market") account in the 19-account `Initialize2` layout.
 const INITIALIZE2_SEED_INDEX: usize = 14;
-/// [`BeamAmmV4Receipt::lp_disposition`]: LP is held by the migration PDA; no release path.
-pub const LP_HELD_UNRESOLVED: u8 = 0;
+/// [`BeamAmmV4Receipt::lp_disposition`]: all LP issued to Beam was burned.
+pub const LP_BURNED: u8 = 1;
 
 /// The Raydium AMM v4 program this build migrates into (devnet id with `raydium-devnet`).
 #[cfg(feature = "raydium-devnet")]
@@ -125,7 +125,7 @@ pub struct BeamAmmV4Receipt {
     pub setup_spent: u64,
     /// The `open_time` passed to Raydium; never later than the migration slot's clock.
     pub open_time: u64,
-    /// What happened to the LP tokens; see [`LP_HELD_UNRESOLVED`].
+    /// What happened to the LP tokens; see [`LP_BURNED`].
     pub lp_disposition: u8,
 }
 
@@ -351,8 +351,8 @@ pub fn configure_migration(ctx: Context<ConfigureAmmV4>, max_create_pool_fee: u6
     Ok(())
 }
 
-/// No production build can turn migration on. LP custody, fee rights and the
-/// Token-2022 plan are undecided, so the feature exists for local tests only.
+/// No production build can turn migration on. Token-2022 graduation and fee
+/// routing still need review, so the feature exists for local tests only.
 #[must_use]
 pub fn activation_permitted(enabled: bool) -> bool {
     !enabled || cfg!(feature = "experimental-amm-v4")
@@ -681,6 +681,29 @@ fn verify_pool(a: &MigrateAmmV4, pre: &Preflight, before: &Baseline, mint: &Pubk
     Ok(())
 }
 
+/// Burns exactly the LP Raydium issued to Beam. A failure rolls back pool creation and
+/// all funding in this transaction; no later instruction can recover the burned position.
+fn burn_pool_lp(a: &MigrateAmmV4, pre: &Preflight, mint: &Pubkey, authority_bump: u8) -> Result<()> {
+    let authority_bump = [authority_bump];
+    let authority_seeds: &[&[u8]] = &[AMM_V4_MIGRATION_AUTHORITY_SEED, mint.as_ref(), &authority_bump];
+    token::burn(
+        CpiContext::new_with_signer(
+            a.token_program.to_account_info(),
+            Burn {
+                mint: a.lp_mint.to_account_info(),
+                from: a.authority_lp.to_account_info(),
+                authority: a.migration_authority.to_account_info(),
+            },
+            &[authority_seeds],
+        ),
+        pre.plan.user_lp,
+    )?;
+    let lp_mint = token::spl_token::state::Mint::unpack(&a.lp_mint.try_borrow_data()?)?;
+    let lp_account = token_state(&a.authority_lp.to_account_info())?;
+    require!(lp_mint.supply == 0 && lp_account.amount == 0, BeamError::InvalidMigrationResult);
+    Ok(())
+}
+
 /// Returns the unspent part of the setup budget to the caller.
 fn refund_setup(a: &MigrateAmmV4, mint: &Pubkey, authority_bump: u8, refund: u64) -> Result<()> {
     if refund == 0 {
@@ -734,7 +757,7 @@ fn record(a: &mut MigrateAmmV4, pre: &Preflight, mint: Pubkey, open_time: u64) {
         lp_amount: pre.plan.user_lp,
         setup_spent: pre.setup_cost,
         open_time,
-        lp_disposition: LP_HELD_UNRESOLVED,
+        lp_disposition: LP_BURNED,
     });
     a.bonding_curve.real_quote_reserves = 0;
     a.bonding_curve.real_token_reserves = 0;
@@ -771,6 +794,7 @@ pub fn execute_migration(ctx: Context<MigrateAmmV4>, open_time: u64, max_create_
     fund_sources(ctx.accounts, &pre, &before, &mint, ctx.bumps.bonding_curve, setup_budget)?;
     initialize_pool(ctx.accounts, &pre, &mint, open_time, ctx.bumps.migration_authority)?;
     verify_pool(ctx.accounts, &pre, &before, &mint, open_time, setup_budget)?;
+    burn_pool_lp(ctx.accounts, &pre, &mint, ctx.bumps.migration_authority)?;
 
     // `verify_pool` proved Raydium charged exactly `setup_cost`, so the rest of the budget is unspent.
     let refund = setup_budget.checked_sub(pre.setup_cost).ok_or(BeamError::SetupFundingOutOfBounds)?;
