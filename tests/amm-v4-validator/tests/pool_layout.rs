@@ -25,3 +25,34 @@ fn pool_offsets_used_by_beam_readers_match_the_pinned_layout() {
     assert_eq!(offset_of!(AmmInfo, market), 528);
     assert_eq!(offset_of!(AmmInfo, target_orders), 592);
 }
+
+/// The extra offsets read by `beam_amm_v4_pool_state.rs`, which compares a fresh pool field by field.
+#[test]
+fn pool_state_offsets_match_the_pinned_layout() {
+    assert_eq!(offset_of!(AmmInfo, coin_decimals), 32);
+    assert_eq!(offset_of!(AmmInfo, pc_decimals), 40);
+    assert_eq!(offset_of!(AmmInfo, fees), 128);
+    assert_eq!(size_of::<raydium_amm::state::Fees>(), 64, "eight u64 fee words");
+    assert_eq!(offset_of!(AmmInfo, state_data.pool_open_time), 224);
+    assert_eq!(offset_of!(AmmInfo, open_orders), 496);
+    assert_eq!(offset_of!(AmmInfo, market_program), 560);
+    assert_eq!(offset_of!(AmmInfo, lp_amount), 720);
+}
+
+/// `PINNED_FEES` in the program must equal what Raydium's own initializer writes into a new pool.
+#[test]
+fn pinned_fee_words_equal_raydiums_initializer() {
+    let mut fees = raydium_amm::state::Fees::default();
+    fees.initialize().expect("fees initialize");
+    let words = [
+        fees.min_separate_numerator,
+        fees.min_separate_denominator,
+        fees.trade_fee_numerator,
+        fees.trade_fee_denominator,
+        fees.pnl_numerator,
+        fees.pnl_denominator,
+        fees.swap_fee_numerator,
+        fees.swap_fee_denominator,
+    ];
+    assert_eq!(words, [5, 10_000, 25, 10_000, 12, 100, 25, 10_000]);
+}

@@ -22,6 +22,7 @@
 )]
 use crate::{
     beam_amm_v4 as abi,
+    beam_amm_v4_pool_state::{ExpectedPool, PoolState, AMM_INFO_LEN},
     beam_policy::BeamError,
     beam_raydium::{migration_quote, protected_curve_floor},
     trade_types::BondingCurve,
@@ -48,12 +49,13 @@ pub const AMM_V4_RECEIPT_SEED: &[u8] = b"beam-amm-v4-migration";
 pub const AMM_V4_RIGHTS_SEED: &[u8] = b"beam-amm-rights";
 /// Account space of [`BeamAmmV4Rights`]: discriminator, six keys, revision, paused.
 pub const AMM_V4_RIGHTS_SPACE: usize = 8 + 6 * 32 + 8 + 1;
-/// `AmmStatus::SwapOnly` in the pinned source: the pool trades and nothing is scheduled.
-const STATUS_SWAP_ONLY: u64 = 6;
-/// Size of the pinned packed `AmmInfo` account.
-const AMM_INFO_LEN: usize = 752;
 /// Size of the pinned packed `TargetOrders` account.
 const TARGET_ORDERS_LEN: usize = 2208;
+/// Highest mint decimals the pinned initializer handles. It multiplies `10^max(decimals)` by 5 in
+/// a `u64`, so a mint with 19 decimals overflows inside Raydium (found by draft PR #29).
+pub const MAX_SAFE_MINT_DECIMALS: u8 = 18;
+/// Position of the pool-seed ("market") account in the 19-account `Initialize2` layout.
+const INITIALIZE2_SEED_INDEX: usize = 14;
 /// [`BeamAmmV4Receipt::lp_disposition`]: LP is held by the migration PDA; no release path.
 pub const LP_HELD_UNRESOLVED: u8 = 0;
 
@@ -399,10 +401,31 @@ fn token_state(account: &AccountInfo) -> Result<token::spl_token::state::Account
     Ok(token::spl_token::state::Account::unpack(&account.try_borrow_data()?)?)
 }
 
-/// Reads a little-endian `u64` at `at`, or `None` when the slice is too short.
-fn read_u64(data: &[u8], at: usize) -> Option<u64> {
-    let bytes: [u8; 8] = data.get(at..)?.get(..8)?.try_into().ok()?;
-    Some(u64::from_le_bytes(bytes))
+/// Fails when the launch mint has more decimals than the pinned initializer can handle.
+fn require_supported_decimals(decimals: u8) -> Result<()> {
+    require!(decimals <= MAX_SAFE_MINT_DECIMALS, BeamError::UnsupportedMint);
+    Ok(())
+}
+
+/// Whether every key differs from every other.
+fn all_distinct(keys: &[Pubkey]) -> bool {
+    keys.iter().enumerate().all(|(index, key)| keys.iter().skip(index.saturating_add(1)).all(|other| other != key))
+}
+
+/// A migration source must be a plain, initialized, unfrozen token account of the expected mint
+/// and owner, with no delegate and no close authority. Its balance is deliberately not required
+/// to be zero: donations are recorded and preserved, so one cannot block graduation.
+fn require_clean_source(state: &token::spl_token::state::Account, mint: &Pubkey, owner: &Pubkey, native: bool) -> Result<()> {
+    require!(
+        state.mint == *mint
+            && state.owner == *owner
+            && state.state == token::spl_token::state::AccountState::Initialized
+            && state.delegate.is_none()
+            && state.close_authority.is_none()
+            && state.is_native.is_some() == native,
+        BeamError::InvalidMigrationSource
+    );
+    Ok(())
 }
 
 /// Everything decided before any lamport or token moves.
@@ -464,6 +487,7 @@ fn preflight(a: &MigrateAmmV4, open_time: u64, max_create_pool_fee: u64, setup_b
     }
     abi::validate_mints(&initialize2_accounts(a, &mint, *a.mint.to_account_info().owner, *a.wsol_mint.to_account_info().owner))
         .map_err(|_| error!(BeamError::UnsupportedMint))?;
+    require_supported_decimals(a.mint.decimals)?;
 
     // The fee is read from Raydium's own config immediately before the CPI. The budget must cover
     // the real cost and may not exceed the worst case the caller accepted: rent is fixed by the
@@ -507,12 +531,17 @@ fn initialize2_accounts(a: &MigrateAmmV4, mint: &Pubkey, mint_owner: Pubkey, wso
 
 /// Records the balances that must be unchanged apart from the planned movement.
 fn baseline(a: &MigrateAmmV4, create_pool_fee: u64) -> Result<Baseline> {
+    let authority = a.migration_authority.key();
     let wsol_info = a.authority_wsol.to_account_info();
-    let wsol_reserve = token_state(&wsol_info)?.is_native.ok_or(BeamError::InvalidMigrationBalance)?;
+    let wsol = token_state(&wsol_info)?;
+    require_clean_source(&wsol, &token::spl_token::native_mint::ID, &authority, true)?;
+    let base = token_state(&a.authority_base.to_account_info())?;
+    require_clean_source(&base, &a.mint.key(), &authority, false)?;
+    let wsol_reserve = wsol.is_native.ok_or(BeamError::InvalidMigrationBalance)?;
     let fee_destination = if create_pool_fee > 0 { token_state(&a.create_pool_fee_destination.to_account_info())?.amount } else { 0 };
     Ok(Baseline {
         authority_lamports: a.migration_authority.lamports(),
-        base: a.authority_base.amount,
+        base: base.amount,
         wsol_spendable: wsol_info.lamports().checked_sub(wsol_reserve).ok_or(BeamError::InvalidMigrationBalance)?,
         fee_destination,
     })
@@ -570,6 +599,10 @@ fn initialize_pool(a: &MigrateAmmV4, pre: &Preflight, mint: &Pubkey, open_time: 
         abi::Initialize2Args { open_time, init_pc_amount: pre.plan.pc_amount, init_coin_amount: pre.plan.coin_amount },
     )
     .map_err(|_| error!(BeamError::InvalidRaydiumAccount))?;
+    // The mint doubles as the pool seed, so that one meta repeats the coin mint. Every other
+    // account must be a distinct key, so no writable account can stand in for another role.
+    let keys: Vec<Pubkey> = ix.accounts.iter().enumerate().filter(|(index, _)| *index != INITIALIZE2_SEED_INDEX).map(|(_, meta)| meta.pubkey).collect();
+    require!(all_distinct(&keys), BeamError::InvalidRaydiumAccount);
     let candidates = [
         a.token_program.to_account_info(),
         a.associated_token_program.to_account_info(),
@@ -601,15 +634,28 @@ fn initialize_pool(a: &MigrateAmmV4, pre: &Preflight, mint: &Pubkey, open_time: 
 }
 
 /// A successful CPI is not the result Beam wanted: authenticate the pool, vaults, LP and fee.
-fn verify_pool(a: &MigrateAmmV4, pre: &Preflight, before: &Baseline, mint: &Pubkey, setup_budget: u64) -> Result<()> {
+fn verify_pool(a: &MigrateAmmV4, pre: &Preflight, before: &Baseline, mint: &Pubkey, open_time: u64, setup_budget: u64) -> Result<()> {
     let pool_info = a.amm_pool.to_account_info();
     require_keys_eq!(*pool_info.owner, AMM_V4_PROGRAM, BeamError::InvalidMigrationResult);
-    {
-        let pool = pool_info.try_borrow_data()?;
-        require!(pool.len() == AMM_INFO_LEN, BeamError::InvalidMigrationResult);
-        // Only SwapOnly: `open_time` is bounded by the clock, so the pool opens immediately.
-        require!(read_u64(&pool, 0) == Some(STATUS_SWAP_ONLY), BeamError::InvalidMigrationResult);
-    }
+    // Raydium locks `10^coin_decimals` LP forever, and the pool's own total includes it.
+    let locked = 10u64.checked_pow(u32::from(a.mint.decimals)).ok_or(PumpError::Overflow)?;
+    // `open_time` is bounded by the clock, so the pool must come out `SwapOnly` and trade at once.
+    PoolState::parse(&pool_info.try_borrow_data()?)?.verify(&ExpectedPool {
+        nonce: pre.pool.nonce,
+        coin_decimals: a.mint.decimals,
+        pc_decimals: a.wsol_mint.decimals,
+        open_time,
+        coin_vault: pre.pool.coin_vault,
+        pc_vault: pre.pool.pc_vault,
+        coin_mint: *mint,
+        pc_mint: a.wsol_mint.key(),
+        lp_mint: pre.pool.lp_mint,
+        market_seed: *mint,
+        target_orders: pre.pool.target_orders,
+        lp_amount: pre.plan.user_lp.checked_add(locked).ok_or(PumpError::Overflow)?,
+    })?;
+    let orders = a.target_orders.to_account_info();
+    require!(*orders.owner == AMM_V4_PROGRAM && orders.data_len() == TARGET_ORDERS_LEN, BeamError::InvalidMigrationResult);
     for (vault, vault_mint, amount) in [(&a.coin_vault, *mint, pre.plan.coin_amount), (&a.pc_vault, a.wsol_mint.key(), pre.plan.pc_amount)] {
         let state = token_state(&vault.to_account_info())?;
         require!(state.owner == pre.pool.authority && state.mint == vault_mint && state.amount == amount, BeamError::InvalidMigrationResult);
@@ -724,7 +770,7 @@ pub fn execute_migration(ctx: Context<MigrateAmmV4>, open_time: u64, max_create_
 
     fund_sources(ctx.accounts, &pre, &before, &mint, ctx.bumps.bonding_curve, setup_budget)?;
     initialize_pool(ctx.accounts, &pre, &mint, open_time, ctx.bumps.migration_authority)?;
-    verify_pool(ctx.accounts, &pre, &before, &mint, setup_budget)?;
+    verify_pool(ctx.accounts, &pre, &before, &mint, open_time, setup_budget)?;
 
     // `verify_pool` proved Raydium charged exactly `setup_cost`, so the rest of the budget is unspent.
     let refund = setup_budget.checked_sub(pre.setup_cost).ok_or(BeamError::SetupFundingOutOfBounds)?;
@@ -783,13 +829,49 @@ mod tests {
     }
 
     #[test]
-    fn read_u64_is_bounds_checked() {
-        let data = [1u8, 0, 0, 0, 0, 0, 0, 0, 9];
-        assert_eq!(read_u64(&data, 0), Some(1));
-        assert_eq!(read_u64(&data, 1), Some(9 << 56), "eight bytes remain after offset 1");
-        assert_eq!(read_u64(&data, 2), None, "only seven bytes remain after offset 2");
-        assert_eq!(read_u64(&data, 9), None);
-        assert_eq!(read_u64(&data, usize::MAX), None);
-        assert_eq!(read_u64(&[], 0), None);
+    fn mint_decimals_above_the_initializers_safe_range_are_refused() {
+        assert!(require_supported_decimals(0).is_ok());
+        assert!(require_supported_decimals(6).is_ok());
+        assert!(require_supported_decimals(MAX_SAFE_MINT_DECIMALS).is_ok());
+        assert!(require_supported_decimals(MAX_SAFE_MINT_DECIMALS + 1).is_err());
+        assert!(require_supported_decimals(u8::MAX).is_err());
+        // The overflow Raydium would hit: 10^19 fits a u64 but five times it does not.
+        assert!(10u64.checked_pow(19).is_some());
+        assert!(10u64.checked_pow(19).and_then(|x| x.checked_mul(5)).is_none());
+    }
+
+    #[test]
+    fn duplicate_keys_are_detected() {
+        let (a, b, c) = (Pubkey::new_unique(), Pubkey::new_unique(), Pubkey::new_unique());
+        assert!(all_distinct(&[]));
+        assert!(all_distinct(&[a]));
+        assert!(all_distinct(&[a, b, c]));
+        assert!(!all_distinct(&[a, b, a]));
+        assert!(!all_distinct(&[a, a]));
+    }
+
+    #[test]
+    fn sources_must_be_plain_unfrozen_token_accounts() -> Result<()> {
+        use token::spl_token::state::{Account as TokenAccount, AccountState};
+        let (mint, owner) = (Pubkey::new_unique(), Pubkey::new_unique());
+        let good = TokenAccount { mint, owner, amount: 7, state: AccountState::Initialized, ..TokenAccount::default() };
+        require_clean_source(&good, &mint, &owner, false)?;
+        // A donated balance is allowed; it is recorded and preserved, not rejected.
+        require_clean_source(&TokenAccount { amount: u64::MAX, ..good }, &mint, &owner, false)?;
+        let native = TokenAccount { is_native: Some(2_039_280).into(), ..good };
+        require_clean_source(&native, &mint, &owner, true)?;
+        for bad in [
+            TokenAccount { state: AccountState::Frozen, ..good },
+            TokenAccount { state: AccountState::Uninitialized, ..good },
+            TokenAccount { delegate: Some(Pubkey::new_unique()).into(), ..good },
+            TokenAccount { close_authority: Some(Pubkey::new_unique()).into(), ..good },
+            TokenAccount { mint: Pubkey::new_unique(), ..good },
+            TokenAccount { owner: Pubkey::new_unique(), ..good },
+            native,
+        ] {
+            assert!(require_clean_source(&bad, &mint, &owner, false).is_err());
+        }
+        assert!(require_clean_source(&good, &mint, &owner, true).is_err(), "a non-native account is not a WSOL source");
+        Ok(())
     }
 }

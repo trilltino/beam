@@ -32,7 +32,8 @@
     "tests/compatibility.rs",
     "src/beam_economics.rs",
     "src/beam_amm_v4.rs",
-    "src/beam_amm_v4_migration.rs"
+    "src/beam_amm_v4_migration.rs",
+    "src/beam_amm_v4_pool_state.rs"
   ],
   "deployment_status": "not deployed"
 }

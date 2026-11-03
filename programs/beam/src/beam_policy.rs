@@ -35,6 +35,8 @@ pub enum BeamError {
     SetupFundingOutOfBounds,
     #[msg("Pool open time must not be later than the current time")]
     OpenTimeInFuture,
+    #[msg("A migration source account is frozen, delegated, closable, or not the expected token account")]
+    InvalidMigrationSource,
 }
 
 #[cfg(test)]

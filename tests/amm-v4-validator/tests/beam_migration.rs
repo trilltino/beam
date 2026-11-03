@@ -66,6 +66,8 @@ const BASE_DONATION: u64 = 50;
 const WSOL_DONATION: u64 = 80;
 const ERR_SETUP_BOUNDS: u32 = 7008;
 const ERR_OPEN_TIME: u32 = 7009;
+const ERR_SOURCE: u32 = 7010;
+const ERR_UNSUPPORTED_MINT: u32 = 7005;
 
 fn rent() -> Rent {
     Rent::default()
@@ -182,12 +184,34 @@ struct Opts {
     precreate_pool: bool,
     /// Load the production-style build (no `experimental-amm-v4`) instead of the local-test one.
     production_binary: bool,
+    /// Decimals of the launch mint.
+    mint_decimals: u8,
+    /// Freeze the migration PDA's pre-existing base-token account.
+    frozen_base: bool,
+    /// Freeze the migration PDA's pre-existing wrapped-SOL account.
+    frozen_wsol: bool,
 }
 
 impl Opts {
     fn standard() -> Self {
-        Self { donations: true, mint_owner: spl_token::id(), precreate_pool: false, production_binary: false }
+        Self {
+            donations: true,
+            mint_owner: spl_token::id(),
+            precreate_pool: false,
+            production_binary: false,
+            mint_decimals: DECIMALS,
+            frozen_base: false,
+            frozen_wsol: false,
+        }
     }
+}
+
+/// The same token account with its state set to frozen.
+fn frozen(mut account: Account) -> Account {
+    let mut token = TokenAccount::unpack(&account.data).expect("token account data");
+    token.state = AccountState::Frozen;
+    TokenAccount::pack(token, &mut account.data).expect("a token account packs into its fixed size");
+    account
 }
 
 struct Fx {
@@ -278,7 +302,7 @@ fn fixture_accounts(opts: &Opts, fx: &Fx) -> Vec<(Pubkey, Account)> {
     let curve_lamports = rent().minimum_balance(curve_data.len()) + CREATOR_FEE + PROTOCOL_FEES + REAL_QUOTE + POST_COMPLETE_QUOTE + CURVE_SURPLUS;
     let mut out = vec![
         (fx.curve, Account { lamports: curve_lamports, ..program_owned(curve_data) }),
-        (fx.mint, mint_account(&opts.mint_owner, DECIMALS, TOTAL_SUPPLY)),
+        (fx.mint, mint_account(&opts.mint_owner, opts.mint_decimals, TOTAL_SUPPLY)),
         (fx.curve_vault, token_account(&mint, &curve, VAULT_TOKENS, None)),
         (spl_token::native_mint::id(), mint_account(&spl_token::id(), 9, 0)),
     ];
@@ -291,8 +315,10 @@ fn fixture_accounts(opts: &Opts, fx: &Fx) -> Vec<(Pubkey, Account)> {
     ));
     if opts.donations {
         out.push((fx.authority, sys(AUTHORITY_DONATION)));
-        out.push((fx.authority_base, token_account(&mint, &authority, BASE_DONATION, None)));
-        out.push((fx.authority_wsol, token_account(&spl_token::native_mint::id(), &authority, WSOL_DONATION, Some(rent().minimum_balance(TokenAccount::LEN)))));
+        let base = token_account(&mint, &authority, BASE_DONATION, None);
+        let wsol = token_account(&spl_token::native_mint::id(), &authority, WSOL_DONATION, Some(rent().minimum_balance(TokenAccount::LEN)));
+        out.push((fx.authority_base, if opts.frozen_base { frozen(base) } else { base }));
+        out.push((fx.authority_wsol, if opts.frozen_wsol { frozen(wsol) } else { wsol }));
     }
     if opts.precreate_pool {
         out.push((fx.ray.amm, sys(1)));
@@ -590,6 +616,91 @@ async fn production_build_cannot_enable_migration() {
     assert_eq!(snapshot(&mut ctx, &fx).await, before, "a refused enable or migration must change nothing");
     // Turning it off is always allowed.
     send(&mut ctx, &[enable_ix(&fx, &payer, false)]).await.expect("the transaction succeeds");
+}
+
+/// Raydium's initializer overflows a `u64` for a mint with 19 or more decimals, so Beam refuses
+/// such a mint with a clear error before any funds move.
+#[tokio::test]
+async fn mint_with_too_many_decimals_is_refused_before_anything_moves() {
+    for decimals in [19u8, 255] {
+        let (mut ctx, fx) = enabled_context(Opts { mint_decimals: decimals, ..Opts::standard() }, CREATE_FEE).await;
+        let payer = ctx.payer.pubkey();
+        let before = snapshot(&mut ctx, &fx).await;
+        assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_UNSUPPORTED_MINT);
+        assert_eq!(snapshot(&mut ctx, &fx).await, before, "{decimals} decimals must change nothing");
+    }
+}
+
+/// A frozen source account would make Raydium's transfer fail mid-CPI; it is refused up front.
+#[tokio::test]
+async fn frozen_source_accounts_are_refused_before_anything_moves() {
+    for opts in [Opts { frozen_base: true, ..Opts::standard() }, Opts { frozen_wsol: true, ..Opts::standard() }] {
+        let (mut ctx, fx) = enabled_context(opts, CREATE_FEE).await;
+        let payer = ctx.payer.pubkey();
+        let before = snapshot(&mut ctx, &fx).await;
+        assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_SOURCE);
+        assert_eq!(snapshot(&mut ctx, &fx).await, before, "a frozen source must change nothing");
+    }
+}
+
+/// The 19-account `Initialize2` call exactly as Beam makes it, but for an outside wallet.
+fn raydium_initialize2_ix(fx: &Fx, wallet: &Pubkey, coin_source: &Pubkey, pc_source: &Pubkey, init_pc: u64, init_coin: u64) -> Instruction {
+    let mut data = vec![1u8, fx.ray.nonce];
+    for v in [0u64, init_pc, init_coin] {
+        put_u64(&mut data, v);
+    }
+    let accounts = vec![
+        meta(spl_token::id(), false, false),
+        meta(spl_associated_token_account::id(), false, false),
+        meta(SYSTEM, false, false),
+        meta(solana_program::sysvar::rent::ID, false, false),
+        meta(fx.ray.amm, true, false),
+        meta(fx.ray.amm_authority, false, false),
+        meta(fx.ray.lp_mint, true, false),
+        meta(fx.mint, false, false),
+        meta(spl_token::native_mint::id(), false, false),
+        meta(fx.ray.coin_vault, true, false),
+        meta(fx.ray.pc_vault, true, false),
+        meta(fx.ray.target_orders, true, false),
+        meta(fx.ray.config, false, false),
+        meta(fx.ray.fee_destination, true, false),
+        meta(fx.mint, false, false), // the pool seed: the launch mint, which anyone can compute
+        meta(*wallet, true, true),
+        meta(*coin_source, true, false),
+        meta(*pc_source, true, false),
+        meta(spl_associated_token_account::get_associated_token_address(wallet, &fx.ray.lp_mint), true, false),
+    ];
+    Instruction { program_id: raydium_amm::id(), accounts, data }
+}
+
+/// Pool-seed pre-emption, demonstrated for real rather than argued: because the pool address is
+/// derived from the public mint, anyone holding a little of the token and some SOL can create the
+/// pool through Raydium first, at a price of their choosing. Beam then refuses to migrate and
+/// moves nothing. The harm is availability (this curve can no longer graduate through this
+/// instruction), not loss of funds. See docs/AMM_V4_MIGRATION.md, "Pool-seed pre-emption".
+#[tokio::test]
+async fn a_third_party_can_create_the_pool_first_and_beam_then_fails_closed() {
+    let (mut ctx, fx) = enabled_context(Opts::standard(), CREATE_FEE).await;
+    let outsider = ctx.payer.pubkey();
+    let (coin_source, pc_source) = (Pubkey::new_unique(), Pubkey::new_unique());
+    let tokens = 1_000_000_000u64;
+    let reserve = rent().minimum_balance(TokenAccount::LEN);
+    ctx.set_account(&coin_source, &token_account(&fx.mint, &outsider, tokens, None).into());
+    ctx.set_account(&pc_source, &token_account(&spl_token::native_mint::id(), &outsider, tokens, Some(reserve)).into());
+
+    // The outsider's own transaction succeeds: nothing in Raydium ties the pool to Beam.
+    send(&mut ctx, &[raydium_initialize2_ix(&fx, &outsider, &coin_source, &pc_source, tokens, tokens)])
+        .await
+        .expect("an outsider can create the pool at the mint-derived address");
+    let pool = must(&mut ctx, &fx.ray.amm).await;
+    assert_eq!(pool.owner, raydium_amm::id());
+    assert_eq!(u64_at(&pool.data, 0), 6, "the outsider's pool is already trading");
+
+    // Beam's migration now fails closed and leaves the curve, its tokens and every balance alone.
+    let before = snapshot(&mut ctx, &fx).await;
+    assert_custom(send(&mut ctx, &[migrate_ix(&fx, &outsider, CREATE_FEE, budget())]).await, ERR_INVALID_ACCOUNT);
+    assert_eq!(snapshot(&mut ctx, &fx).await, before, "a pre-empted migration must move nothing");
+    assert!(account(&mut ctx, &fx.receipt).await.is_none(), "no receipt is written for a pre-empted migration");
 }
 
 /// A caller must not be able to schedule the pool to open later: Raydium would create it
