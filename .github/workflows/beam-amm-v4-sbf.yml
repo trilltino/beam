@@ -1,0 +1,157 @@
+name: Beam AMM v4 SBF end-to-end
+on: [push, pull_request]
+permissions:
+  contents: read
+# A new push to the same ref supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+# Actions are pinned by commit SHA; the comment names the tag or branch each one is.
+jobs:
+  # Both Beam binaries are built once here and reused by the two test jobs.
+  build-beam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      # Pinned to the version the local runs used; it downloads Solana platform-tools v1.57 on first use.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-build-sbf
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/solana
+          key: cargo-build-sbf-4.4.0-platform-tools-1.57-${{ hashFiles('programs/beam/Cargo.lock') }}
+          restore-keys: cargo-build-sbf-4.4.0-platform-tools-1.57-
+      - run: command -v cargo-build-sbf || cargo install cargo-build-sbf --version 4.4.0 --locked
+      # Local-test build: the activation feature is on, so the tests can run a migration.
+      - name: Build Beam to SBF (local-test)
+        working-directory: programs/beam
+        run: cargo build-sbf --arch v0 --no-default-features --features no-idl,experimental-amm-v4
+      # Release-style build: no activation feature, so migration can never be enabled.
+      - name: Build Beam to SBF (production-style)
+        working-directory: programs/beam
+        run: cargo build-sbf --arch v0 --no-default-features --features no-idl --sbf-out-dir target/deploy-production
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: beam-sbf
+          path: |
+            programs/beam/target/deploy/beam_program.so
+            programs/beam/target/deploy-production/beam_program.so
+          if-no-files-found: error
+          retention-days: 7
+
+  beam-to-raydium:
+    needs: build-beam
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-validator-${{ hashFiles('tests/amm-v4-validator/Cargo.lock') }}
+          restore-keys: cargo-registry-validator-
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: beam-sbf
+          path: programs/beam/target
+      - name: Beam to pinned Raydium AMM v4, end to end
+        working-directory: tests/amm-v4-validator
+        run: cargo test --locked --features beam-sbf --test beam_migration -- --test-threads=1
+
+  # The same migration on a real solana-test-validator, with both programs compiled to SBF.
+  live-validator:
+    needs: build-beam
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      RAYDIUM_COMMIT: 91739d8d9f5cf347e0ce14ebe4d2bb7069fb31b6
+      AGAVE_VERSION: v4.4.0
+      # SHA-256 of solana-release-x86_64-unknown-linux-gnu.tar.bz2 as published for that release.
+      AGAVE_SHA256: 3363f4728fe786ac7036e342a20df928aa2e3e43f807fbdce67814840538c574
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-build-sbf
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/solana
+          key: cargo-build-sbf-4.4.0-platform-tools-1.57-${{ hashFiles('tests/amm-v4-validator/Cargo.lock') }}
+          restore-keys: cargo-build-sbf-4.4.0-platform-tools-1.57-
+      - run: command -v cargo-build-sbf || cargo install cargo-build-sbf --version 4.4.0 --locked
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: beam-sbf
+          path: programs/beam/target
+      - name: Build the pinned Raydium AMM v4 program to SBF
+        run: |
+          git clone --no-checkout https://github.com/raydium-io/raydium-amm "$RUNNER_TEMP/raydium-amm"
+          git -C "$RUNNER_TEMP/raydium-amm" checkout --detach "$RAYDIUM_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/raydium-amm" rev-parse HEAD)" = "$RAYDIUM_COMMIT"
+          cd "$RUNNER_TEMP/raydium-amm/program"
+          cargo build-sbf --arch v0 --sbf-out-dir "$RUNNER_TEMP/raydium-out"
+          test -s "$RUNNER_TEMP/raydium-out/raydium_amm.so"
+      # The 80+ MB download is cached by version and hash, and checked again on every run.
+      - name: Restore the Agave download
+        id: agave-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/agave-download
+          key: agave-${{ env.AGAVE_VERSION }}-${{ env.AGAVE_SHA256 }}
+      - name: Install the Agave validator (pinned and hash-checked)
+        run: |
+          mkdir -p "$HOME/agave-download"
+          if [ ! -s "$HOME/agave-download/agave.tar.bz2" ]; then
+            curl -fsSL -o "$HOME/agave-download/agave.tar.bz2" \
+              "https://github.com/anza-xyz/agave/releases/download/$AGAVE_VERSION/solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+          fi
+          echo "$AGAVE_SHA256  $HOME/agave-download/agave.tar.bz2" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/agave"
+          tar -xjf "$HOME/agave-download/agave.tar.bz2" -C "$RUNNER_TEMP/agave"
+          echo "$RUNNER_TEMP/agave/solana-release/bin" >> "$GITHUB_PATH"
+      - name: Same suite with Raydium as compiled SBF instead of the Rust processor
+        working-directory: tests/amm-v4-validator
+        env:
+          RAYDIUM_SO: ${{ runner.temp }}/raydium-out/raydium_amm.so
+        run: cargo test --locked --features beam-sbf --test beam_migration -- --test-threads=1
+      - name: Migrate on a live solana-test-validator
+        working-directory: tests/amm-v4-validator
+        env:
+          RAYDIUM_SO: ${{ runner.temp }}/raydium-out/raydium_amm.so
+        run: |
+          solana-test-validator --version
+          cargo test --locked --features live-validator --test beam_migration live:: -- --test-threads=1 --nocapture
+      # Informational: the binary Raydium actually runs on mainnet, read over public RPC. A network
+      # or loader problem here does not fail the job, but the outcome is written to the summary.
+      - name: Dump the deployed Raydium program (read-only)
+        id: mainnet-dump
+        continue-on-error: true
+        run: |
+          solana program dump -u https://api.mainnet-beta.solana.com 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 "$RUNNER_TEMP/raydium-mainnet.so"
+          sha256sum "$RUNNER_TEMP/raydium-mainnet.so"
+      - name: Live migration against the deployed mainnet binary
+        id: mainnet-live
+        if: steps.mainnet-dump.outcome == 'success'
+        continue-on-error: true
+        working-directory: tests/amm-v4-validator
+        env:
+          RAYDIUM_SO: ${{ runner.temp }}/raydium-mainnet.so
+        run: cargo test --locked --features live-validator --test beam_migration live::live_validator -- --test-threads=1 --nocapture
+      - name: Report the deployed-binary result
+        if: always()
+        run: |
+          {
+            echo "### Deployed Raydium binary (informational)"
+            echo "- dump from mainnet: ${{ steps.mainnet-dump.outcome }}"
+            echo "- live migration against it: ${{ steps.mainnet-live.outcome }}"
+            echo "A pinned-source build is not the deployed binary; only this step exercises the latter."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -29,6 +29,14 @@ pub enum BeamError {
     UnsupportedMint,
     #[msg("Raydium returned unexpected pool, vault, or LP state")]
     InvalidMigrationResult,
+    #[msg("Raydium create-pool fee exceeds the Beam-configured cap")]
+    CreatePoolFeeExceedsCap,
+    #[msg("Setup funding is outside the exact bounds for Raydium's create-pool fee and account rent")]
+    SetupFundingOutOfBounds,
+    #[msg("Pool open time must not be later than the current time")]
+    OpenTimeInFuture,
+    #[msg("A migration source account is frozen, delegated, closable, or not the expected token account")]
+    InvalidMigrationSource,
 }
 
 #[cfg(test)]

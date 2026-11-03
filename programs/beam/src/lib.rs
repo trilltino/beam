@@ -90,7 +90,7 @@ declare_program!(mayhem);
 #[program]
 pub mod pump_recovered {
     use super::*;
-    pub fn initialize(ctx:Context<Initialize>)->Result<()>{global_init::execute(ctx)} pub fn configure_raydium(ctx: Context<ConfigureRaydium>) -> Result<()> { beam_raydium::configure(ctx) } pub fn set_raydium_enabled(ctx: Context<SetRaydiumEnabled>, enabled: bool) -> Result<()> { beam_raydium::set_enabled(ctx, enabled) } pub fn migrate_raydium<'info>(ctx: Context<'_, '_, '_, 'info, MigrateRaydium<'info>>, setup_budget: u64) -> Result<()> { beam_raydium::execute(ctx, setup_budget) }
+    pub fn initialize(ctx:Context<Initialize>)->Result<()>{global_init::execute(ctx)} pub fn configure_raydium(ctx: Context<ConfigureRaydium>) -> Result<()> { beam_raydium::configure(ctx) } pub fn set_raydium_enabled(ctx: Context<SetRaydiumEnabled>, enabled: bool) -> Result<()> { beam_raydium::set_enabled(ctx, enabled) } pub fn migrate_raydium<'info>(ctx: Context<'_, '_, '_, 'info, MigrateRaydium<'info>>, setup_budget: u64) -> Result<()> { beam_raydium::execute(ctx, setup_budget) } pub fn configure_amm_v4(ctx: Context<ConfigureV4>, max_pool_fee: u64) -> Result<()> { beam_amm_v4_migration::configure_v4(ctx, max_pool_fee) } pub fn set_amm_v4_enabled(ctx: Context<EnableV4>, enabled: bool) -> Result<()> { beam_amm_v4_migration::enable_v4(ctx, enabled) } pub fn migrate_amm_v4(ctx: Context<MigrateV4>, open_time: u64, max_pool_fee: u64, budget: u64) -> Result<()> { beam_amm_v4_migration::migrate_v4(ctx, open_time, max_pool_fee, budget) }
     pub fn update_global_authority(ctx:Context<UpdateGlobalAuthority>)->Result<()>{update_global_authority_handler(ctx)}
 // layout-pad: aligns the next Source site with the original lib.rs line
 
@@ -3217,6 +3217,6 @@ fn revoke_mint_authority<'info>(bump:u8,accounts:&(&Program<'info,anchor_spl::to
 // Beam-specific modules are separate to retain upstream source coordinates.
 pub mod beam_policy;
 pub mod beam_economics;
-pub mod beam_amm_v4;
+pub mod beam_amm_v4; pub mod beam_amm_v4_migration; pub mod beam_amm_v4_pool_state; pub mod beam_migration_math;
 pub mod beam_raydium;
-pub use beam_raydium::*;
+pub use beam_raydium::*; pub use beam_amm_v4_migration::*;
