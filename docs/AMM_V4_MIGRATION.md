@@ -113,7 +113,8 @@ uses by default. `--arch v0` is required: `cargo-build-sbf` 4.4 defaults to SBPF
 3.0.0 test runtime rejects with `UnsupportedProgramId`. The `beam-sbf` feature keeps the existing validator CI job from needing an SBF
 build.
 
-Twelve tests pass locally. `.github/workflows/beam-amm-v4-sbf.yml` runs the same builds and tests on Linux; it has not run yet. Cases covered: success with and without pre-existing source accounts and donations (exact vault,
+Twelve tests pass locally, and `.github/workflows/beam-amm-v4-sbf.yml` runs the same builds and
+tests on a GitHub Linux runner (passed on the first run in a private fork, commit `959f72f`). Cases covered: success with and without pre-existing source accounts and donations (exact vault,
 LP, fee, curve, refund and receipt values, including the exact setup rent Raydium charged);
 disabled config; replay; fee cap on both the caller and stored sides; setup funding one lamport
 under the exact cost and one over the accepted worst case; funding for a higher fee cap refunded
@@ -126,6 +127,30 @@ derived, so no test provokes an in-CPI Raydium failure; rollback after a complet
 
 `cargo check --locked --all-features` fails in `programs/beam` because of the inherited
 `anchor-debug` feature (`solana_program` unresolved). That is independent of this work.
+
+## AMM v4 quote path
+
+`TASKS.md` and `STATUS.md` list an AMM v4 quote path as missing: a `create_v2` launch quoted in an
+already-graduated token fails closed (PR #12) instead of reading an AMM v4 pool. This branch does not
+add a second implementation. Draft PR #49 (stacked on #36, which conflicts with `main`) already has
+`beam_amm_v4_quote.rs::graduated_record`, which values a graduated ancestor from raw AMM v4 pool and
+vault bytes. This branch checks that adapter's assumptions against the pinned source and against
+pools this instruction produces:
+
+- **Layout.** `tests/pool_layout.rs` pins every hard-coded offset the #49 reader uses (status 0,
+  pending PnL 192 and 200, vaults 336 and 368, mints 400 and 432, LP mint 464, market seed 528,
+  target orders 592, size 752) to the packed `AmmInfo` at the Raydium pin. All match.
+- **Preconditions.** After a real migration, `assert_quote_ready` checks what the #49 reader checks:
+  `SwapOnly` status, zero pending PnL, identity fields equal to Beam-derived addresses (the mint is
+  the market seed), vaults owned by Raydium's authority with no delegate or close authority, and a
+  fully backed WSOL vault. A pool migrated here satisfies all of them.
+- **Gap.** #49's reader also requires an `AmmV4Rights` account for the pool, created by its own
+  `register` instruction with authority and creator signatures. `migrate_amm_v4` does not create
+  one, so a token graduated by this instruction is not quotable until rights are registered. How
+  rights, creator payouts and donation records relate is the open design that PR carries.
+- **Valuation.** The reader uses spot vault reserves minus pending PnL. That is not a TWAP or oracle
+  and can be moved by one trade; it should not price anything an attacker can profit from
+  without a manipulation bound.
 
 ## What this does not establish
 
@@ -149,5 +174,7 @@ derived, so no test provokes an in-CPI Raydium failure; rollback after a complet
    and graduation then fails closed (tested) with no way to retry. A fresh caller-supplied seed
    recorded in the receipt avoids this, at the cost of a non-deterministic pool address. Pick one
    before activation.
-4. **Curve state.** Reserves are zeroed after migration, as the CPMM candidate did. A dedicated
+4. **Rights registry.** Whether migration should create the pool's rights record, or a separate
+   instruction does, before graduated tokens can be quoted (see the quote path above).
+5. **Curve state.** Reserves are zeroed after migration, as the CPMM candidate did. A dedicated
    migrated flag on the curve would be clearer.

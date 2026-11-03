@@ -382,6 +382,39 @@ fn u64_at(data: &[u8], at: usize) -> u64 {
 const TARGET_ORDERS_LEN: usize = 2208;
 const AMM_INFO_LEN: usize = 752;
 
+/// A migrated pool must be readable by a graduated-ancestor quote: SwapOnly status,
+/// no pending PnL, identity fields equal to the addresses Beam derives (the mint is the
+/// market seed), vaults owned by Raydium's authority with no delegate or close authority,
+/// and a WSOL vault fully backed by lamports. These are the checks the AMM v4 quote adapter
+/// in draft PR #49 makes on raw pool bytes; the offsets are pinned in `pool_layout.rs`.
+/// Its separate rights-registry account is not created by this instruction.
+async fn assert_quote_ready(ctx: &mut ProgramTestContext, fx: &Fx, coin: u64, pc: u64) {
+    let pool = account(ctx, &fx.ray.amm).await.unwrap().data;
+    let key_at = |at: usize| Pubkey::try_from(&pool[at..at + 32]).unwrap();
+    assert_eq!(u64_at(&pool, 0), 6, "SwapOnly");
+    assert_eq!((u64_at(&pool, 192), u64_at(&pool, 200)), (0, 0), "no pending PnL on a fresh pool");
+    assert_eq!(key_at(336), fx.ray.coin_vault);
+    assert_eq!(key_at(368), fx.ray.pc_vault);
+    assert_eq!(key_at(400), fx.mint);
+    assert_eq!(key_at(432), spl_token::native_mint::id());
+    assert_eq!(key_at(464), fx.ray.lp_mint);
+    assert_eq!(key_at(528), fx.mint, "market seed is the mint");
+    assert_eq!(key_at(592), fx.ray.target_orders);
+    for (vault, mint, amount, native) in [(fx.ray.coin_vault, fx.mint, coin, false), (fx.ray.pc_vault, spl_token::native_mint::id(), pc, true)] {
+        let acct = account(ctx, &vault).await.unwrap();
+        assert_eq!(acct.owner, spl_token::id());
+        let t = TokenAccount::unpack(&acct.data).unwrap();
+        assert_eq!((t.mint, t.owner, t.amount, t.state), (mint, fx.ray.amm_authority, amount, AccountState::Initialized));
+        assert!(t.delegate.is_none() && t.close_authority.is_none(), "vault must have no delegate or close authority");
+        let native_reserve: Option<u64> = t.is_native.into();
+        match (native, native_reserve) {
+            (false, None) => {}
+            (true, Some(reserve)) => assert!(acct.lamports >= reserve + t.amount, "WSOL vault is not fully backed"),
+            _ => panic!("unexpected native flag on {vault}"),
+        }
+    }
+}
+
 /// Runs the migration and checks every effect against the planned amounts.
 async fn assert_migrates(ctx: &mut ProgramTestContext, fx: &Fx) {
     let before = snapshot(ctx, fx).await;
@@ -395,6 +428,7 @@ async fn assert_migrates(ctx: &mut ProgramTestContext, fx: &Fx) {
     assert_eq!(u64_at(&pool.data, 0), 6, "SwapOnly");
     assert_eq!(amount(&account(ctx, &fx.ray.coin_vault).await.unwrap()), VAULT_TOKENS);
     assert_eq!(amount(&account(ctx, &fx.ray.pc_vault).await.unwrap()), pc);
+    assert_quote_ready(ctx, fx, VAULT_TOKENS, pc).await;
 
     // LP is issued to the migration PDA and stays there: no burn, no transfer.
     let (_, user_lp) = expected_lp(VAULT_TOKENS, pc, DECIMALS).unwrap();
