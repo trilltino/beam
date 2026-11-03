@@ -33,6 +33,8 @@ pub enum BeamError {
     CreatePoolFeeExceedsCap,
     #[msg("Setup funding is outside the exact bounds for Raydium's create-pool fee and account rent")]
     SetupFundingOutOfBounds,
+    #[msg("Pool open time must not be later than the current time")]
+    OpenTimeInFuture,
 }
 
 #[cfg(test)]

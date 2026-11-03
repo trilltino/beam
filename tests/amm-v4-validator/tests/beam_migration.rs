@@ -65,6 +65,7 @@ const AUTHORITY_DONATION: u64 = 1_000_000;
 const BASE_DONATION: u64 = 50;
 const WSOL_DONATION: u64 = 80;
 const ERR_SETUP_BOUNDS: u32 = 7008;
+const ERR_OPEN_TIME: u32 = 7009;
 
 fn rent() -> Rent {
     Rent::default()
@@ -89,7 +90,7 @@ fn mint_account(owner: &Pubkey, decimals: u8, supply: u64) -> Account {
     mint.is_initialized = true;
     mint.supply = supply;
     let mut data = vec![0; Mint::LEN];
-    Mint::pack(mint, &mut data).unwrap();
+    Mint::pack(mint, &mut data).expect("a mint packs into its fixed size");
     Account { lamports: rent().minimum_balance(data.len()), data, owner: *owner, executable: false, rent_epoch: 0 }
 }
 
@@ -101,7 +102,7 @@ fn token_account(mint: &Pubkey, owner: &Pubkey, amount: u64, native_reserve: Opt
     token.state = AccountState::Initialized;
     token.is_native = native_reserve.into();
     let mut data = vec![0; TokenAccount::LEN];
-    TokenAccount::pack(token, &mut data).unwrap();
+    TokenAccount::pack(token, &mut data).expect("a token account packs into its fixed size");
     let lamports = match native_reserve {
         Some(reserve) => reserve + amount,
         None => rent().minimum_balance(data.len()),
@@ -325,8 +326,13 @@ fn enable_ix(fx: &Fx, authority: &Pubkey, enabled: bool) -> Instruction {
 }
 
 fn migrate_ix(fx: &Fx, user: &Pubkey, max_fee: u64, budget: u64) -> Instruction {
+    migrate_ix_at(fx, user, 0, max_fee, budget)
+}
+
+/// `migrate_amm_v4(open_time, max_create_pool_fee, setup_budget)`.
+fn migrate_ix_at(fx: &Fx, user: &Pubkey, open_time: u64, max_fee: u64, budget: u64) -> Instruction {
     let mut data = DISC_MIGRATE.to_vec();
-    for v in [0u64, max_fee, budget] {
+    for v in [open_time, max_fee, budget] {
         put_u64(&mut data, v);
     }
     let wsol = spl_token::native_mint::id();
@@ -363,7 +369,7 @@ fn migrate_ix(fx: &Fx, user: &Pubkey, max_fee: u64, budget: u64) -> Instruction 
 }
 
 async fn send(ctx: &mut ProgramTestContext, ixs: &[Instruction]) -> Result<(), BanksClientError> {
-    let blockhash = ctx.get_new_latest_blockhash().await.unwrap();
+    let blockhash = ctx.get_new_latest_blockhash().await.expect("the bank provides a blockhash");
     let tx = Transaction::new_signed_with_payer(ixs, Some(&ctx.payer.pubkey()), &[&ctx.payer], blockhash);
     ctx.banks_client.process_transaction(tx).await
 }
@@ -385,7 +391,7 @@ trait Reader {
 
 impl Reader for ProgramTestContext {
     async fn read(&mut self, key: &Pubkey) -> Option<Account> {
-        self.banks_client.get_account(*key).await.unwrap()
+        self.banks_client.get_account(*key).await.expect("the bank answers account reads")
     }
 }
 
@@ -393,8 +399,13 @@ async fn account<R: Reader>(ctx: &mut R, key: &Pubkey) -> Option<Account> {
     ctx.read(key).await
 }
 
+/// Reads an account that the test requires to exist, naming it when it does not.
+async fn must<R: Reader>(ctx: &mut R, key: &Pubkey) -> Account {
+    account(ctx, key).await.unwrap_or_else(|| panic!("account {key} must exist"))
+}
+
 fn amount(a: &Account) -> u64 {
-    TokenAccount::unpack(&a.data).unwrap().amount
+    TokenAccount::unpack(&a.data).expect("token account data").amount
 }
 
 /// Every account a migration could touch, for exact rollback comparison.
@@ -414,8 +425,8 @@ async fn enabled_context(opts: Opts, cap: u64) -> (ProgramTestContext, Fx) {
     let (pt, fx) = build(opts);
     let mut ctx = start(pt, &fx).await;
     let payer = ctx.payer.pubkey();
-    send(&mut ctx, &[configure_ix(&fx, &payer, cap)]).await.unwrap();
-    send(&mut ctx, &[enable_ix(&fx, &payer, true)]).await.unwrap();
+    send(&mut ctx, &[configure_ix(&fx, &payer, cap)]).await.expect("the transaction succeeds");
+    send(&mut ctx, &[enable_ix(&fx, &payer, true)]).await.expect("the transaction succeeds");
     (ctx, fx)
 }
 
@@ -425,7 +436,7 @@ fn lamports(a: &Option<Account>) -> u64 {
 }
 
 fn u64_at(data: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(data[at..at + 8].try_into().unwrap())
+    u64::from_le_bytes(data[at..at + 8].try_into().expect("eight bytes at the offset"))
 }
 
 const TARGET_ORDERS_LEN: usize = 2208;
@@ -438,8 +449,8 @@ const AMM_INFO_LEN: usize = 752;
 /// in draft PR #49 makes on raw pool bytes; the offsets are pinned in `pool_layout.rs`.
 /// The rights record it also needs is written by the migration; see `assert_rights_record`.
 async fn assert_quote_ready<R: Reader>(ctx: &mut R, fx: &Fx, coin: u64, pc: u64) {
-    let pool = account(ctx, &fx.ray.amm).await.unwrap().data;
-    let key_at = |at: usize| Pubkey::try_from(&pool[at..at + 32]).unwrap();
+    let pool = must(ctx, &fx.ray.amm).await.data;
+    let key_at = |at: usize| Pubkey::try_from(&pool[at..at + 32]).expect("a 32-byte key at the offset");
     assert_eq!(u64_at(&pool, 0), 6, "SwapOnly");
     assert_eq!((u64_at(&pool, 192), u64_at(&pool, 200)), (0, 0), "no pending PnL on a fresh pool");
     assert_eq!(key_at(336), fx.ray.coin_vault);
@@ -450,9 +461,9 @@ async fn assert_quote_ready<R: Reader>(ctx: &mut R, fx: &Fx, coin: u64, pc: u64)
     assert_eq!(key_at(528), fx.mint, "market seed is the mint");
     assert_eq!(key_at(592), fx.ray.target_orders);
     for (vault, mint, amount, native) in [(fx.ray.coin_vault, fx.mint, coin, false), (fx.ray.pc_vault, spl_token::native_mint::id(), pc, true)] {
-        let acct = account(ctx, &vault).await.unwrap();
+        let acct = must(ctx, &vault).await;
         assert_eq!(acct.owner, spl_token::id());
-        let t = TokenAccount::unpack(&acct.data).unwrap();
+        let t = TokenAccount::unpack(&acct.data).expect("token account data");
         assert_eq!((t.mint, t.owner, t.amount, t.state), (mint, fx.ray.amm_authority, amount, AccountState::Initialized));
         assert!(t.delegate.is_none() && t.close_authority.is_none(), "vault must have no delegate or close authority");
         let native_reserve: Option<u64> = t.is_native.into();
@@ -485,7 +496,7 @@ async fn assert_rights_record<R: Reader>(ctx: &mut R, fx: &Fx) {
 async fn assert_migrates(ctx: &mut ProgramTestContext, fx: &Fx) {
     let before = snapshot(ctx, fx).await;
     let payer = ctx.payer.pubkey();
-    send(ctx, &[migrate_ix(fx, &payer, CREATE_FEE, budget())]).await.unwrap();
+    send(ctx, &[migrate_ix(fx, &payer, CREATE_FEE, budget())]).await.expect("the transaction succeeds");
     assert_migrated(ctx, fx, &before).await;
 }
 
@@ -497,29 +508,29 @@ async fn assert_migrated<R: Reader>(ctx: &mut R, fx: &Fx, before: &[Option<Accou
     assert_eq!(pool.owner, raydium_amm::id());
     assert_eq!(pool.data.len(), AMM_INFO_LEN);
     assert_eq!(u64_at(&pool.data, 0), 6, "SwapOnly");
-    assert_eq!(amount(&account(ctx, &fx.ray.coin_vault).await.unwrap()), VAULT_TOKENS);
-    assert_eq!(amount(&account(ctx, &fx.ray.pc_vault).await.unwrap()), pc);
+    assert_eq!(amount(&must(ctx, &fx.ray.coin_vault).await), VAULT_TOKENS);
+    assert_eq!(amount(&must(ctx, &fx.ray.pc_vault).await), pc);
     assert_quote_ready(ctx, fx, VAULT_TOKENS, pc).await;
 
     // LP is issued to the migration PDA and stays there: no burn, no transfer.
-    let (_, user_lp) = expected_lp(VAULT_TOKENS, pc, DECIMALS).unwrap();
-    let lp_mint = Mint::unpack(&account(ctx, &fx.ray.lp_mint).await.unwrap().data).unwrap();
+    let (_, user_lp) = expected_lp(VAULT_TOKENS, pc, DECIMALS).expect("the planned pool issues LP");
+    let lp_mint = Mint::unpack(&must(ctx, &fx.ray.lp_mint).await.data).expect("LP mint data");
     assert_eq!(lp_mint.supply, user_lp);
-    let lp = TokenAccount::unpack(&account(ctx, &fx.authority_lp).await.unwrap().data).unwrap();
+    let lp = TokenAccount::unpack(&must(ctx, &fx.authority_lp).await.data).expect("LP account data");
     assert_eq!((lp.owner, lp.mint, lp.amount), (fx.authority, fx.ray.lp_mint, user_lp));
 
     // Raydium's fee lands once; the curve keeps rent, fee claims and the surplus.
-    assert_eq!(amount(&account(ctx, &fx.ray.fee_destination).await.unwrap()), FEE_DEST_DONATION + CREATE_FEE);
-    assert_eq!(amount(&account(ctx, &fx.curve_vault).await.unwrap()), 0);
-    let curve = account(ctx, &fx.curve).await.unwrap();
+    assert_eq!(amount(&must(ctx, &fx.ray.fee_destination).await), FEE_DEST_DONATION + CREATE_FEE);
+    assert_eq!(amount(&must(ctx, &fx.curve_vault).await), 0);
+    let curve = must(ctx, &fx.curve).await;
     assert_eq!(curve.lamports, lamports(&before[0]) - (REAL_QUOTE + POST_COMPLETE_QUOTE));
     assert_eq!(curve.lamports, rent().minimum_balance(curve.data.len()) + CREATOR_FEE + PROTOCOL_FEES + CURVE_SURPLUS);
     assert_eq!(lamports(&account(ctx, &fx.withdraw).await), MIGRATION_FEE);
 
     // Unrelated donations are neither adopted nor swept, and unspent setup is refunded.
     let (base_d, wsol_d, auth_d) = if fx.donations { (BASE_DONATION, WSOL_DONATION, AUTHORITY_DONATION) } else { (0, 0, 0) };
-    assert_eq!(amount(&account(ctx, &fx.authority_base).await.unwrap()), base_d);
-    let wsol = account(ctx, &fx.authority_wsol).await.unwrap();
+    assert_eq!(amount(&must(ctx, &fx.authority_base).await), base_d);
+    let wsol = must(ctx, &fx.authority_wsol).await;
     assert_eq!(amount(&wsol), wsol_d);
     assert_eq!(wsol.lamports, rent().minimum_balance(TokenAccount::LEN) + wsol_d);
     assert_eq!(lamports(&account(ctx, &fx.authority).await), auth_d);
@@ -559,7 +570,7 @@ async fn disabled_config_blocks_before_any_movement() {
     let (pt, fx) = build(Opts::standard());
     let mut ctx = start(pt, &fx).await;
     let payer = ctx.payer.pubkey();
-    send(&mut ctx, &[configure_ix(&fx, &payer, CREATE_FEE)]).await.unwrap();
+    send(&mut ctx, &[configure_ix(&fx, &payer, CREATE_FEE)]).await.expect("the transaction succeeds");
     let before = snapshot(&mut ctx, &fx).await;
     assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_NOT_ENABLED);
     assert_eq!(snapshot(&mut ctx, &fx).await, before);
@@ -572,13 +583,29 @@ async fn production_build_cannot_enable_migration() {
     let (pt, fx) = build(Opts { production_binary: true, ..Opts::standard() });
     let mut ctx = start(pt, &fx).await;
     let payer = ctx.payer.pubkey();
-    send(&mut ctx, &[configure_ix(&fx, &payer, CREATE_FEE)]).await.unwrap();
+    send(&mut ctx, &[configure_ix(&fx, &payer, CREATE_FEE)]).await.expect("the transaction succeeds");
     let before = snapshot(&mut ctx, &fx).await;
     assert_custom(send(&mut ctx, &[enable_ix(&fx, &payer, true)]).await, ERR_NOT_ENABLED);
     assert_custom(send(&mut ctx, &[migrate_ix(&fx, &payer, CREATE_FEE, budget())]).await, ERR_NOT_ENABLED);
     assert_eq!(snapshot(&mut ctx, &fx).await, before, "a refused enable or migration must change nothing");
     // Turning it off is always allowed.
-    send(&mut ctx, &[enable_ix(&fx, &payer, false)]).await.unwrap();
+    send(&mut ctx, &[enable_ix(&fx, &payer, false)]).await.expect("the transaction succeeds");
+}
+
+/// A caller must not be able to schedule the pool to open later: Raydium would create it
+/// waiting, nobody could trade, and the migration could not be redone.
+#[tokio::test]
+async fn pool_cannot_be_scheduled_to_open_in_the_future() {
+    let (mut ctx, fx) = enabled_context(Opts::standard(), CREATE_FEE).await;
+    let payer = ctx.payer.pubkey();
+    let before = snapshot(&mut ctx, &fx).await;
+    for open_time in [4_102_444_800u64, u64::MAX] {
+        let ix = migrate_ix_at(&fx, &payer, open_time, CREATE_FEE, budget());
+        assert_custom(send(&mut ctx, &[ix]).await, ERR_OPEN_TIME);
+    }
+    assert_eq!(snapshot(&mut ctx, &fx).await, before, "a refused open time must change nothing");
+    // The same migration with the open time left at zero still works.
+    assert_migrates(&mut ctx, &fx).await;
 }
 
 #[tokio::test]
@@ -682,12 +709,12 @@ async fn funding_for_a_higher_fee_cap_is_refunded_to_the_exact_cost() {
     let cap = CREATE_FEE + 5_000_000;
     let (mut ctx, fx) = enabled_context(Opts::standard(), cap).await;
     let payer = ctx.payer.pubkey();
-    let payer_before = account(&mut ctx, &payer).await.unwrap().lamports;
-    send(&mut ctx, &[migrate_ix(&fx, &payer, cap, setup_cost(cap))]).await.unwrap();
+    let payer_before = must(&mut ctx, &payer).await.lamports;
+    send(&mut ctx, &[migrate_ix(&fx, &payer, cap, setup_cost(cap))]).await.expect("the transaction succeeds");
     let r = account(&mut ctx, &fx.receipt).await.expect("receipt");
     assert_eq!(u64_at(&r.data, 104 + 8 * 5), budget(), "setup_spent is the exact cost, not the funded amount");
     assert_eq!(lamports(&account(&mut ctx, &fx.authority).await), AUTHORITY_DONATION);
-    let payer_after = account(&mut ctx, &payer).await.unwrap().lamports;
+    let payer_after = must(&mut ctx, &payer).await.lamports;
     // The payer pays the exact cost, the receipt's rent and a small transaction fee; the extra 5M comes back.
     let receipt_rent = rent().minimum_balance(r.data.len()) + rent().minimum_balance(209);
     let paid = payer_before - payer_after;
@@ -733,7 +760,7 @@ mod live {
 
     impl Reader for RpcClient {
         async fn read(&mut self, key: &Pubkey) -> Option<Account> {
-            self.get_account_with_commitment(key, CommitmentConfig::confirmed()).await.unwrap().value
+            self.get_account_with_commitment(key, CommitmentConfig::confirmed()).await.expect("the validator answers account reads").value
         }
     }
 
@@ -773,12 +800,12 @@ mod live {
             a.executable,
             a.data.len()
         );
-        std::fs::write(&path, json).unwrap();
+        std::fs::write(&path, json).expect("the account file is written");
         path
     }
 
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        std::net::TcpListener::bind("127.0.0.1:0").expect("a free local port").local_addr().expect("a local address").port()
     }
 
     /// Kills the validator and removes its ledger even when an assertion panics.
@@ -822,7 +849,7 @@ mod live {
         let fx = make_fx(&Opts::standard());
         let dir = std::env::temp_dir().join(format!("beam-live-{}", std::process::id()));
         let accounts_dir = dir.join("accounts");
-        std::fs::create_dir_all(&accounts_dir).unwrap();
+        std::fs::create_dir_all(&accounts_dir).expect("the accounts directory is created");
 
         // Global names the payer as authority, so it is written here with the other fixtures.
         let global = global_bytes(&payer.pubkey(), &fx.withdraw);
@@ -850,7 +877,7 @@ mod live {
         let mut rpc = RpcClient::new_with_commitment(format!("http://127.0.0.1:{rpc_port}"), CommitmentConfig::confirmed());
         let started = Instant::now();
         loop {
-            if let Some(status) = validator.child.try_wait().unwrap() {
+            if let Some(status) = validator.child.try_wait().expect("the validator process can be polled") {
                 panic!("solana-test-validator exited early: {status}");
             }
             if rpc.get_health().await.is_ok() {
@@ -860,14 +887,14 @@ mod live {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        let signature = rpc.request_airdrop(&payer.pubkey(), 20_000_000_000).await.unwrap();
-        while !rpc.confirm_transaction(&signature).await.unwrap() {
+        let signature = rpc.request_airdrop(&payer.pubkey(), 20_000_000_000).await.expect("the faucet funds the payer");
+        while !rpc.confirm_transaction(&signature).await.expect("the airdrop can be confirmed") {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
 
         let key = payer.pubkey();
-        send_tx(&rpc, &payer, &[configure_ix(&fx, &key, CREATE_FEE)]).await.unwrap();
-        send_tx(&rpc, &payer, &[enable_ix(&fx, &key, true)]).await.unwrap();
+        send_tx(&rpc, &payer, &[configure_ix(&fx, &key, CREATE_FEE)]).await.expect("the transaction succeeds");
+        send_tx(&rpc, &payer, &[enable_ix(&fx, &key, true)]).await.expect("the transaction succeeds");
 
         let before = snapshot(&mut rpc, &fx).await;
         send_tx(&rpc, &payer, &[migrate_ix(&fx, &key, CREATE_FEE, budget())]).await.expect("migration on the live validator");

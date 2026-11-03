@@ -43,6 +43,15 @@ have charged exactly the cost, refunds the rest, and records the exact cost as
 `setup_spent`. A caller can no longer over-fund the migration PDA or start a CPI
 that Raydium would fail for lack of rent.
 
+`open_time` may not be later than the current clock time (`OpenTimeInFuture`
+otherwise), and the pool must come out `SwapOnly`. Without this bound any caller
+could graduate a token with a far-future open time: Raydium would create the pool
+waiting to open, nobody could swap, and the migration could not be redone because
+the receipt and pool already exist. Pass `0` (or the current time) to open at once.
+
+A migration uses about 300,000 compute units, around 136,000 of them in Raydium
+itself, so a client must request a limit above the 200,000 default.
+
 ## What `migrate_amm_v4` does
 
 1. Checks the curve is complete with no real token reserves, is not Mayhem, quotes in native SOL,
@@ -118,11 +127,12 @@ uses by default. `--arch v0` is required: `cargo-build-sbf` 4.4 defaults to SBPF
 3.0.0 test runtime rejects with `UnsupportedProgramId`. The `beam-sbf` feature keeps the existing validator CI job from needing an SBF
 build.
 
-Twelve tests pass locally, and `.github/workflows/beam-amm-v4-sbf.yml` runs the same builds and
-tests on a GitHub Linux runner (passed on the first run in a private fork, commit `959f72f`). Cases covered: success with and without pre-existing source accounts and donations (exact vault,
+Thirteen tests pass locally, and `.github/workflows/beam-amm-v4-sbf.yml` runs the same builds and
+tests on a GitHub Linux runner (passed in a private fork). Cases covered: success with and without pre-existing source accounts and donations (exact vault,
 LP, fee, curve, refund and receipt values, including the exact setup rent Raydium charged);
 disabled config; replay; fee cap on both the caller and stored sides; setup funding one lamport
-under the exact cost and one over the accepted worst case; funding for a higher fee cap refunded
+under the exact cost and one over the accepted worst case; an open time in the future refused
+before anything moves; funding for a higher fee cap refunded
 down to the exact cost; a production-style build (no activation feature) refusing to enable or run
 migration; Token-2022 mint; pre-created pool; ten substituted accounts; and a later
 instruction failing after a successful migration. Each failure compares every touched account byte
