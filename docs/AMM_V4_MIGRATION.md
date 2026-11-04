@@ -49,9 +49,10 @@ could graduate a token with a far-future open time: Raydium would create the poo
 waiting to open, nobody could swap, and the migration could not be redone because
 the receipt and pool already exist. Pass `0` (or the current time) to open at once.
 
-Before the LP burn was added, a migration measured 208,623 compute units on a validator
-(see "Measured cost"). The burn increases that cost; a client must request a measured,
-reviewed limit above the 200,000 default.
+With the LP burn, a migration measures 191,377 compute units on a validator (see "Measured
+cost"), 8,623 under the 200,000 default. That margin is thin and moves with the Raydium build
+and the account state, so a client should request an explicit, reviewed limit above the
+measured figure instead of relying on the default.
 
 ## What `migrate_amm_v4` does
 
@@ -185,13 +186,15 @@ checks that remove their causes, not on a test that provokes them.
 
 ## Measured cost
 
-Measured on PR #68 before the LP burn, on `solana-test-validator` 4.4.0 by simulating
-the transaction (a measurement, not an estimate), unless marked. **These compute figures
-are stale for this head and must be refreshed from the hosted validator run.**
+Measured on `solana-test-validator` 4.4.0 by simulating the transaction (a measurement, not
+an estimate). The whole-transaction compute row and the transaction-size row are from the
+hosted validator run on `5bb076c`, which has the LP burn. **The rows that name the
+program-test bank and the deployed binary are from PR #68 before the burn and are stale for
+this head.**
 
 | Quantity | Value |
 | --- | --- |
-| Compute units, whole transaction | 208,623 (default limit is 200,000, so a client must request more) |
+| Compute units, whole transaction | 191,377 with the LP burn (8,623 under the 200,000 default; 208,623 before the burn and the tidy-up in #79) |
 | Compute units, `solana-program-test` 3.0.0 bank | 299,763 (Raydium 135,823; associated-token program 20,389); the difference from the validator figure is not explained |
 | Raydium on the deployed binary | 208,441 total |
 | Transaction size | 1,100 bytes (limit 1,232) |
